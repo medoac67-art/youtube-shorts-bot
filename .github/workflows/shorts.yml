@@ -24,7 +24,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core
 
       - name: Install Python packages
-        run: pip install --upgrade pip && pip install requests pillow edge-tts
+        run: pip install --upgrade pip && pip install requests pillow edge-tts google-api-python-client google-auth
 
       - name: Run bot script
         env:
@@ -34,4 +34,7 @@ jobs:
           ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
           AGNES_API_KEY: ${{ secrets.AGNES_API_KEY }}
           SAIL_API_KEY: ${{ secrets.SAIL_API_KEY }}
+          YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
+          YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
+          YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
         run: python scripts/bot.py
