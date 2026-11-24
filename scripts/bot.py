@@ -1,12 +1,11 @@
 import asyncio
 import json
+import math
 import os
 import re
 import subprocess
 from datetime import datetime, timezone
-from io import BytesIO
 from pathlib import Path
-from urllib.parse import quote
 
 import edge_tts
 import requests
@@ -18,6 +17,11 @@ from PIL import Image, ImageDraw, ImageFont
 
 OUT_DIR = Path("output")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+W, H = 1080, 1920
+# شبكة بكسل حقيقية بأبعاد 18x32 مضروبة في 60 = 1080x1920
+GRID_W, GRID_H = 54, 96
+PX = 20
 
 
 def get_slot_number() -> int:
@@ -40,102 +44,222 @@ def extract_json(text: str) -> dict:
 
 def generate_story_payload(slot: int) -> dict:
     prompt = f"""
-Create a distinct short story (#{slot} of 4 daily shorts) for a pixel-art YouTube Short.
-Return ONLY valid JSON with these exact keys:
+Create a suspenseful short story (#{slot} of 4 daily shorts) for an Arabic mystery YouTube Shorts channel ("ملفات سرية") in the style of retro 2D pixel-art story animations.
+Return ONLY valid JSON with this exact structure:
 {{
-  "title": "catchy short title",
-  "story": "engaging narration in Arabic suitable for 35-50 seconds (around 90-120 words)",
-  "translation": "natural English translation of the story",
-  "description": "engaging 2-3 sentence hook description",
-  "keywords": ["keyword1", "keyword2", "keyword3", "keyword4", "keyword5"],
-  "hashtags": ["#shorts", "#pixelart", "#story", "#animation", "#mystery"],
-  "scenes": [
-    "pixel art scene 1 description, 16-bit retro aesthetic, crisp pixels, dramatic lighting",
-    "pixel art scene 2 description, 16-bit retro aesthetic, crisp pixels, dramatic lighting",
-    "pixel art scene 3 description, 16-bit retro aesthetic, crisp pixels, dramatic lighting",
-    "pixel art scene 4 description, 16-bit retro aesthetic, crisp pixels, dramatic lighting"
-  ],
-  "thumbnail_text": "2-4 short punchy words"
+  "title": "catchy short Arabic title",
+  "description": "engaging 2-3 sentence hook in Arabic",
+  "keywords": ["ملفات سرية", "pixel art", "قصص غموض", "شورتس", "أنيميشن"],
+  "hashtags": ["#shorts", "#pixelart", "#ملفات_سرية", "#غموض", "#قصص"],
+  "thumbnail_text": "كلمة أو كلمتان",
+  "beats": [
+    {{
+      "caption": "في منتصف الليل",
+      "highlight_word": "الليل",
+      "scene": "alley_night",
+      "mood": "neutral",
+      "prop": "none",
+      "has_shadow": true
+    }},
+    {{
+      "caption": "لاحظت ظلا يتحرك",
+      "highlight_word": "ظلا",
+      "scene": "alley_night",
+      "mood": "surprised",
+      "prop": "exclamation",
+      "has_shadow": true
+    }},
+    {{
+      "caption": "يشير نحو باب غامض",
+      "highlight_word": "باب",
+      "scene": "alley_night",
+      "mood": "curious",
+      "prop": "idea",
+      "has_shadow": true
+    }},
+    {{
+      "caption": "فتحت الباب ببطء",
+      "highlight_word": "الباب",
+      "scene": "corridor",
+      "mood": "shocked",
+      "prop": "speech",
+      "has_shadow": false
+    }},
+    {{
+      "caption": "وكان الممر طويلا جدا",
+      "highlight_word": "طويلا",
+      "scene": "corridor",
+      "mood": "surprised",
+      "prop": "exclamation",
+      "has_shadow": true
+    }},
+    {{
+      "caption": "همس صوت في الظلام",
+      "highlight_word": "الظلام",
+      "scene": "room_night",
+      "mood": "shocked",
+      "prop": "heart",
+      "has_shadow": true
+    }}
+  ]
 }}
+
+Rules for beats:
+- Make 6 to 8 beats that form one coherent, suspenseful Arabic mystery story (about 35-45 seconds when spoken).
+- Each "caption" must be 2 to 5 short Arabic words so subtitles stay crisp and readable.
+- "highlight_word" must be one word from "caption".
+- "scene" must be one of: "alley_night", "corridor", "room_night", "street_day".
+- "mood" must be one of: "neutral", "surprised", "shocked", "happy", "curious".
+- "prop" must be one of: "none", "exclamation", "idea", "speech", "heart".
 """
     openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip()
     groq_key = os.getenv("GROQ_API_KEY", "").strip()
     google_key = os.getenv("GOOGLE_API_KEY", "").strip()
     zhipu_key = os.getenv("ZHIPU_API_KEY", "").strip()
 
-    if openrouter_key:
-        r = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {openrouter_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "openrouter/free",
-                "messages": [{"role": "user", "content": prompt}],
-            },
-            timeout=60,
-        )
-        if r.ok:
-            return extract_json(r.json()["choices"][0]["message"]["content"])
+    try:
+        if openrouter_key:
+            r = requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {openrouter_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "openrouter/free",
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+                timeout=45,
+            )
+            if r.ok:
+                data = extract_json(r.json()["choices"][0]["message"]["content"])
+                if isinstance(data.get("beats"), list) and len(data["beats"]) >= 4:
+                    return data
+    except Exception:
+        pass
 
-    if groq_key:
-        r = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {groq_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "llama-3.3-70b-versatile",
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.8,
-            },
-            timeout=60,
-        )
-        if r.ok:
-            return extract_json(r.json()["choices"][0]["message"]["content"])
+    try:
+        if groq_key:
+            r = requests.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {groq_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "llama-3.3-70b-versatile",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.75,
+                },
+                timeout=45,
+            )
+            if r.ok:
+                data = extract_json(r.json()["choices"][0]["message"]["content"])
+                if isinstance(data.get("beats"), list) and len(data["beats"]) >= 4:
+                    return data
+    except Exception:
+        pass
 
-    if zhipu_key:
-        r = requests.post(
-            "https://open.bigmodel.cn/api/paas/v4/chat/completions",
-            headers={
-                "Authorization": f"Bearer {zhipu_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "glm-4-flash",
-                "messages": [{"role": "user", "content": prompt}],
-            },
-            timeout=60,
-        )
-        if r.ok:
-            return extract_json(r.json()["choices"][0]["message"]["content"])
+    try:
+        if zhipu_key:
+            r = requests.post(
+                "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {zhipu_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "glm-4-flash",
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+                timeout=45,
+            )
+            if r.ok:
+                data = extract_json(r.json()["choices"][0]["message"]["content"])
+                if isinstance(data.get("beats"), list) and len(data["beats"]) >= 4:
+                    return data
+    except Exception:
+        pass
 
-    if google_key:
-        r = requests.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={google_key}",
-            headers={"Content-Type": "application/json"},
-            json={"contents": [{"parts": [{"text": prompt}]}]},
-            timeout=60,
-        )
-        if r.ok:
-            return extract_json(r.json()["candidates"][0]["content"]["parts"][0]["text"])
+    try:
+        if google_key:
+            r = requests.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={google_key}",
+                headers={"Content-Type": "application/json"},
+                json={"contents": [{"parts": [{"text": prompt}]}]},
+                timeout=45,
+            )
+            if r.ok:
+                data = extract_json(r.json()["candidates"][0]["content"]["parts"][0]["text"])
+                if isinstance(data.get("beats"), list) and len(data["beats"]) >= 4:
+                    return data
+    except Exception:
+        pass
 
     return {
-        "title": f"قصة بكسل آرت #{slot}",
-        "story": "في مدينة مبنية بالكامل من وحدات البكسل، اكتشف بطلنا بوابة مخفية تفتح عالماً لم يره أحد من قبل. ومع كل خطوة كان الصوت يزداد وضوحاً والسر يقترب من الانكشاف.",
-        "translation": "In a city built entirely out of pixels, our hero discovered a hidden gate opening to an unseen world.",
-        "description": "مغامرة قصيرة بأسلوب Pixel Art تكشف سراً غامضاً في لحظات حاسمة.",
-        "keywords": ["pixel art", "قصص قصيرة", "شورتس", "أنيميشن", "غموض"],
-        "hashtags": ["#shorts", "#pixelart", "#story", "#retro", "#gaming"],
-        "scenes": [
-            "retro 16-bit pixel art city at night with glowing neon signs, crisp pixels",
-            "pixel art adventurer standing before an ancient glowing portal, crisp pixels",
-            "pixel art floating islands and mysterious runes in deep space, crisp pixels",
-            "dramatic pixel art close-up of a glowing key in hand, crisp pixels",
+        "title": f"ملف سري #{slot}: ظل في الزقاق",
+        "description": "قصة غموض قصيرة بأسلوب Pixel Art من سلسلة ملفات سرية. ماذا يحدث عندما يتحرك الظل وحده في منتصف الليل؟",
+        "keywords": ["ملفات سرية", "pixel art", "قصص غموض", "شورتس", "أنيميشن"],
+        "hashtags": ["#shorts", "#pixelart", "#ملفات_سرية", "#غموض", "#قصص"],
+        "thumbnail_text": "ظل غامض",
+        "beats": [
+            {
+                "caption": "في منتصف الليل",
+                "highlight_word": "الليل",
+                "scene": "alley_night",
+                "mood": "neutral",
+                "prop": "none",
+                "has_shadow": True,
+            },
+            {
+                "caption": "لاحظت ظلي يتحرك",
+                "highlight_word": "ظلي",
+                "scene": "alley_night",
+                "mood": "surprised",
+                "prop": "exclamation",
+                "has_shadow": True,
+            },
+            {
+                "caption": "قبل أن أخطو خطوة",
+                "highlight_word": "خطوة",
+                "scene": "alley_night",
+                "mood": "curious",
+                "prop": "idea",
+                "has_shadow": True,
+            },
+            {
+                "caption": "يشير نحو باب مغلق",
+                "highlight_word": "باب",
+                "scene": "alley_night",
+                "mood": "surprised",
+                "prop": "none",
+                "has_shadow": True,
+            },
+            {
+                "caption": "فتحت الباب فظهر ممر",
+                "highlight_word": "ممر",
+                "scene": "corridor",
+                "mood": "shocked",
+                "prop": "speech",
+                "has_shadow": False,
+            },
+            {
+                "caption": "يتردد فيه صدى خافت",
+                "highlight_word": "صدى",
+                "scene": "corridor",
+                "mood": "curious",
+                "prop": "none",
+                "has_shadow": True,
+            },
+            {
+                "caption": "أدركت أن السر بدأ",
+                "highlight_word": "السر",
+                "scene": "room_night",
+                "mood": "shocked",
+                "prop": "exclamation",
+                "has_shadow": True,
+            },
         ],
-        "thumbnail_text": "سر البوابة",
     }
 
 
@@ -155,69 +279,337 @@ def build_formatted_description(payload: dict) -> str:
     return f"{desc}\n\nالكلمات المفتاحية:\n{kw_text}\n\n{tags_text}".strip()
 
 
-def pixelize_image(img: Image.Image, target_w: int = 1080, target_h: int = 1920) -> Image.Image:
-    base = img.convert("RGB").resize((target_w, target_h), Image.Resampling.LANCZOS)
-    small = (
-        base.resize((135, 240), Image.Resampling.BILINEAR)
-        .quantize(colors=32, method=Image.Quantize.MEDIANCUT)
-        .convert("RGB")
-    )
-    return small.resize((target_w, target_h), Image.Resampling.NEAREST)
+def px_rect(draw: ImageDraw.ImageDraw, x0: int, y0: int, x1: int, y1: int, fill, outline=None) -> None:
+    draw.rectangle([x0 * PX, y0 * PX, (x1 + 1) * PX - 1, (y1 + 1) * PX - 1], fill=fill, outline=outline)
 
 
-def fetch_pixel_scene(scene_prompt: str, out_path: Path) -> None:
-    encoded = quote(f"{scene_prompt}, pixel art, 16-bit, crisp edges")
-    url = f"https://image.pollinations.ai/prompt/{encoded}?width=540&height=960&nologo=true"
-    try:
-        r = requests.get(url, timeout=45)
-        if r.ok and r.headers.get("content-type", "").startswith("image"):
-            im = Image.open(BytesIO(r.content))
-            pixelize_image(im).save(out_path)
-            return
-    except Exception:
-        pass
+def draw_alley_night(draw: ImageDraw.ImageDraw, frame_idx: int) -> None:
+    # سماء ليلية ونجوم وقمر
+    px_rect(draw, 0, 0, GRID_W - 1, 18, (24, 24, 52))
+    px_rect(draw, 0, 19, GRID_W - 1, 24, (38, 32, 68))
+    # قمر
+    px_rect(draw, 8, 5, 13, 10, (245, 238, 185))
+    px_rect(draw, 9, 6, 12, 9, (255, 250, 210))
+    # نجوم متقطعة
+    stars = [(3, 4), (17, 7), (25, 3), (34, 9), (42, 5), (48, 12), (21, 13), (6, 15)]
+    for idx_s, (sx, sy) in enumerate(stars):
+        if (frame_idx + idx_s) % 6 != 0:
+            px_rect(draw, sx, sy, sx, sy, (235, 235, 250))
 
-    fallback = Image.new("RGB", (1080, 1920), (20, 24, 48))
-    draw = ImageDraw.Draw(fallback)
-    for y in range(0, 1920, 120):
-        color = (35 + (y // 120) * 10, 20, 65 + (y // 120) * 8)
-        draw.rectangle([0, y, 1080, y + 120], fill=color)
-    pixelize_image(fallback).save(out_path)
+    # أفق المدينة
+    for bx in range(0, GRID_W, 9):
+        bh = 15 + ((bx * 3) % 5)
+        px_rect(draw, bx, 25 - bh, bx + 7, 24, (20, 18, 38))
+
+    # جدار الطوب الأحمر
+    px_rect(draw, 0, 25, GRID_W - 1, 66, (158, 72, 62))
+    for row in range(26, 66, 3):
+        offset = 0 if ((row // 3) % 2 == 0) else 2
+        for col in range(offset, GRID_W, 5):
+            px_rect(draw, col, row, col + 3, row + 1, (176, 84, 72))
+            px_rect(draw, col, row + 2, col + 3, row + 2, (112, 46, 42))
+
+    # نافذة خشبية مغلقة على الجدار
+    px_rect(draw, 33, 33, 43, 44, (78, 44, 30), outline=(22, 18, 24))
+    for wy in range(34, 44, 3):
+        px_rect(draw, 34, wy, 42, wy + 1, (138, 86, 48))
+
+    # عمود إنارة ومصباح دافئ
+    px_rect(draw, 16, 26, 17, 66, (52, 56, 72), outline=(18, 18, 24))
+    px_rect(draw, 14, 26, 22, 27, (52, 56, 72), outline=(18, 18, 24))
+    lamp_col = (255, 220, 120) if (frame_idx % 8 != 0) else (190, 165, 95)
+    px_rect(draw, 18, 28, 21, 30, lamp_col)
+
+    # رصيف وطريق مرصوف
+    px_rect(draw, 0, 67, GRID_W - 1, 71, (98, 96, 114))
+    px_rect(draw, 0, 72, GRID_W - 1, GRID_H - 1, (72, 70, 92))
+    for py in range(73, GRID_H - 1, 4):
+        for px_i in range(2, GRID_W - 2, 6):
+            shift = (px_i + py) % 3
+            px_rect(draw, px_i + shift, py, px_i + shift + 2, py + 1, (88, 86, 110))
+    # بركة ماء صغيرة
+    px_rect(draw, 31, 76, 41, 79, (56, 72, 118))
+    px_rect(draw, 34, 77, 38, 78, (125, 155, 215))
 
 
-def create_thumbnail(scene_path: Path, thumb_text: str, out_thumb: Path) -> None:
-    im = Image.open(scene_path).convert("RGBA").resize((1080, 1920), Image.Resampling.NEAREST)
-    overlay = Image.new("RGBA", im.size, (0, 0, 0, 0))
-    draw = ImageDraw.Draw(overlay)
-    draw.rectangle([0, 1380, 1080, 1920], fill=(10, 10, 20, 190))
+def draw_corridor(draw: ImageDraw.ImageDraw, frame_idx: int) -> None:
+    # ممر عميق بإضاءة سقف متدرجة
+    px_rect(draw, 0, 0, GRID_W - 1, 14, (52, 56, 96))
+    px_rect(draw, 0, 15, GRID_W - 1, 68, (66, 72, 118))
+    px_rect(draw, 0, 69, GRID_W - 1, GRID_H - 1, (92, 96, 138))
 
-    font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-    font = ImageFont.truetype(font_path, 76) if Path(font_path).exists() else ImageFont.load_default()
-    draw.text((70, 1520), thumb_text[:36], fill=(255, 220, 60, 255), font=font)
+    # إضاءات السقف المتناقصة نحو العمق
+    lights = [(22, 16, 31, 20, (250, 238, 175)), (24, 26, 29, 28, (230, 220, 165)), (25, 33, 28, 34, (205, 200, 160))]
+    for x0, y0, x1, y1, col in lights:
+        px_rect(draw, x0, y0, x1, y1, col)
 
-    Image.alpha_composite(im, overlay).convert("RGB").save(out_thumb)
+    # أبواب جانبية في الممر
+    px_rect(draw, 6, 30, 13, 66, (44, 112, 118), outline=(20, 22, 34))
+    px_rect(draw, 40, 30, 47, 66, (44, 112, 118), outline=(20, 22, 34))
+    # باب مفتوح جزئياً في المقدمة اليسرى
+    swing = (frame_idx // 4) % 2
+    px_rect(draw, 1, 20, 6 + swing, 68, (54, 132, 138), outline=(18, 20, 32))
 
 
-async def generate_voice_and_srt(text: str, audio_path: Path, srt_path: Path) -> None:
-    voice = "ar-SA-HamedNeural"
-    communicate = edge_tts.Communicate(text=text, voice=voice, rate="+5%")
-    submaker = edge_tts.SubMaker()
+def draw_room_night(draw: ImageDraw.ImageDraw, frame_idx: int) -> None:
+    # غرفة خشبية ليلية بنافذة تطل على السماء
+    px_rect(draw, 0, 0, GRID_W - 1, 68, (96, 62, 42))
+    for wx in range(0, GRID_W, 6):
+        px_rect(draw, wx, 0, wx + 4, 68, (112, 74, 50))
+    px_rect(draw, 0, 69, GRID_W - 1, GRID_H - 1, (76, 48, 32))
 
-    with open(audio_path, "wb") as f:
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                f.write(chunk["data"])
-            elif chunk["type"] == "WordBoundary":
-                submaker.feed(chunk)
+    # نافذة
+    px_rect(draw, 33, 18, 45, 34, (24, 28, 56), outline=(25, 18, 14))
+    px_rect(draw, 39, 18, 39, 34, (45, 32, 24))
+    px_rect(draw, 33, 26, 45, 26, (45, 32, 24))
+    if frame_idx % 5 != 0:
+        px_rect(draw, 36, 21, 36, 21, (240, 240, 255))
+        px_rect(draw, 42, 29, 42, 29, (240, 240, 255))
 
-    srt_content = submaker.get_srt()
-    if srt_content.strip():
-        srt_path.write_text(srt_content, encoding="utf-8")
+
+def draw_street_day(draw: ImageDraw.ImageDraw, frame_idx: int) -> None:
+    # سماء نهارية وغيوم ومبانٍ وطريق
+    px_rect(draw, 0, 0, GRID_W - 1, 34, (118, 194, 245))
+    # غيوم
+    cloud_x = 6 + (frame_idx % 12)
+    px_rect(draw, cloud_x, 7, cloud_x + 7, 9, (245, 250, 255))
+    px_rect(draw, cloud_x + 2, 5, cloud_x + 5, 7, (245, 250, 255))
+
+    # عمارات
+    px_rect(draw, 4, 14, 18, 52, (150, 168, 196), outline=(30, 36, 50))
+    px_rect(draw, 22, 10, 36, 52, (198, 142, 118), outline=(30, 36, 50))
+    px_rect(draw, 39, 18, 52, 52, (124, 152, 184), outline=(30, 36, 50))
+
+    # نوافذ مضاءة
+    for wy in range(16, 48, 6):
+        for wx in [7, 13, 25, 31, 42, 47]:
+            px_rect(draw, wx, wy, wx + 2, wy + 3, (255, 236, 150))
+
+    # رصيف وطريق
+    px_rect(draw, 0, 53, GRID_W - 1, 60, (176, 178, 188))
+    px_rect(draw, 0, 61, GRID_W - 1, 74, (68, 72, 82))
+    for rx in range(2, GRID_W, 8):
+        px_rect(draw, rx, 67, rx + 4, 68, (240, 215, 90))
+    px_rect(draw, 0, 75, GRID_W - 1, GRID_H - 1, (86, 168, 76))
+
+
+def draw_character(
+    draw: ImageDraw.ImageDraw,
+    cx: int,
+    cy: int,
+    step_phase: int,
+    mood: str = "neutral",
+    shirt_color=(102, 112, 212),
+    is_shadow: bool = False,
+) -> None:
+    outline = (16, 16, 24)
+    if is_shadow:
+        hair_c = (28, 28, 44)
+        skin_c = (34, 34, 52)
+        shirt_c = (24, 24, 40)
+        pants_c = (18, 18, 32)
+        eye_c = (130, 150, 230)
     else:
-        srt_path.write_text(
-            f"1\n00:00:00,000 --> 00:00:10,000\n{text[:80]}\n",
-            encoding="utf-8",
-        )
+        hair_c = (36, 36, 48)
+        skin_c = (242, 196, 156)
+        shirt_c = shirt_color
+        pants_c = (48, 56, 86)
+        eye_c = (20, 20, 28)
+
+    # الرأس والشعر
+    px_rect(draw, cx - 4, cy - 16, cx + 4, cy - 8, skin_c, outline=outline)
+    px_rect(draw, cx - 4, cy - 17, cx + 4, cy - 13, hair_c, outline=outline)
+
+    # العيون والفم حسب المزاج
+    if mood == "shocked":
+        px_rect(draw, cx - 3, cy - 12, cx - 2, cy - 10, (255, 255, 255))
+        px_rect(draw, cx + 2, cy - 12, cx + 3, cy - 10, (255, 255, 255))
+        px_rect(draw, cx - 2, cy - 11, cx - 2, cy - 11, eye_c)
+        px_rect(draw, cx + 2, cy - 11, cx + 2, cy - 11, eye_c)
+        px_rect(draw, cx - 1, cy - 9, cx + 1, cy - 8, (40, 20, 24))
+    elif mood == "surprised":
+        px_rect(draw, cx - 2, cy - 12, cx - 2, cy - 10, eye_c)
+        px_rect(draw, cx + 2, cy - 12, cx + 2, cy - 10, eye_c)
+        px_rect(draw, cx, cy - 9, cx, cy - 8, (40, 20, 24))
+    elif mood == "happy":
+        px_rect(draw, cx - 3, cy - 11, cx - 1, cy - 11, eye_c)
+        px_rect(draw, cx + 1, cy - 11, cx + 3, cy - 11, eye_c)
+        px_rect(draw, cx - 2, cy - 9, cx + 2, cy - 9, (185, 78, 78))
+    else:
+        px_rect(draw, cx - 2, cy - 11, cx - 2, cy - 11, eye_c)
+        px_rect(draw, cx + 2, cy - 11, cx + 2, cy - 11, eye_c)
+        px_rect(draw, cx - 1, cy - 9, cx + 1, cy - 9, (90, 58, 52))
+
+    # الجذع والذراعان
+    px_rect(draw, cx - 4, cy - 7, cx + 4, cy - 1, shirt_c, outline=outline)
+    arm_lift = -1 if (step_phase % 2 == 1 and mood in ("surprised", "shocked")) else 0
+    px_rect(draw, cx - 6, cy - 7 + arm_lift, cx - 5, cy - 2 + arm_lift, shirt_c, outline=outline)
+    px_rect(draw, cx + 5, cy - 7 + arm_lift, cx + 6, cy - 2 + arm_lift, shirt_c, outline=outline)
+
+    # القدمان بحركة مشي بسيطة
+    left_y = cy if (step_phase % 2 == 0) else cy - 1
+    right_y = cy - 1 if (step_phase % 2 == 0) else cy
+    px_rect(draw, cx - 3, left_y, cx - 1, cy + 2, pants_c, outline=outline)
+    px_rect(draw, cx + 1, right_y, cx + 3, cy + 2, pants_c, outline=outline)
+
+
+def draw_prop(draw: ImageDraw.ImageDraw, cx: int, cy: int, prop: str, frame_idx: int) -> None:
+    bob = (frame_idx % 4) // 2
+    py = cy - 24 - bob
+    if prop == "exclamation":
+        px_rect(draw, cx, py, cx + 1, py + 4, (245, 68, 58), outline=(20, 16, 20))
+        px_rect(draw, cx, py + 6, cx + 1, py + 7, (245, 68, 58), outline=(20, 16, 20))
+    elif prop == "idea":
+        px_rect(draw, cx - 2, py, cx + 3, py + 4, (255, 224, 72), outline=(25, 22, 20))
+        px_rect(draw, cx - 1, py + 5, cx + 2, py + 6, (180, 185, 195))
+    elif prop == "speech":
+        px_rect(draw, cx - 4, py, cx + 5, py + 5, (245, 248, 255), outline=(20, 22, 30))
+        for dx in [-2, 0, 2]:
+            px_rect(draw, cx + dx, py + 2, cx + dx, py + 3, (35, 38, 52))
+    elif prop == "heart":
+        px_rect(draw, cx - 2, py + 1, cx + 3, py + 3, (238, 64, 98))
+        px_rect(draw, cx - 1, py, cx, py + 1, (238, 64, 98))
+        px_rect(draw, cx + 1, py, cx + 2, py + 1, (238, 64, 98))
+        px_rect(draw, cx - 1, py + 4, cx + 2, py + 4, (238, 64, 98))
+        px_rect(draw, cx, py + 5, cx + 1, py + 5, (238, 64, 98))
+
+
+def load_arabic_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    candidates = [
+        "/usr/share/fonts/truetype/noto/NotoNaskhArabic-Bold.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansArabic-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    ]
+    for path in candidates:
+        if Path(path).exists():
+            try:
+                return ImageFont.truetype(path, size)
+            except Exception:
+                continue
+    return ImageFont.load_default()
+
+
+def render_beat_frames(beat: dict, beat_idx: int, duration_sec: float, fps: int = 12) -> list[Path]:
+    num_frames = max(int(round(duration_sec * fps)), 8)
+    scene_name = str(beat.get("scene", "alley_night")).strip()
+    mood = str(beat.get("mood", "neutral")).strip()
+    prop = str(beat.get("prop", "none")).strip()
+    has_shadow = bool(beat.get("has_shadow", True))
+    caption_text = str(beat.get("caption", "")).strip()
+    highlight_word = str(beat.get("highlight_word", "")).strip()
+
+    font_cap = load_arabic_font(62)
+    out_frames: list[Path] = []
+
+    for f_i in range(num_frames):
+        img = Image.new("RGB", (W, H), (18, 18, 32))
+        draw = ImageDraw.Draw(img)
+
+        if scene_name == "corridor":
+            draw_corridor(draw, f_i)
+        elif scene_name == "room_night":
+            draw_room_night(draw, f_i)
+        elif scene_name == "street_day":
+            draw_street_day(draw, f_i)
+        else:
+            draw_alley_night(draw, f_i)
+
+        # حركة الشخصية والظل داخل المشهد
+        drift = int(math.sin((f_i / max(num_frames, 1)) * math.pi) * 3)
+        char_x = 16 + drift
+        char_y = 69
+        draw_character(draw, char_x, char_y, f_i, mood=mood, shirt_color=(102, 112, 212), is_shadow=False)
+
+        if has_shadow:
+            shadow_x = 34 - (drift // 2)
+            draw_character(draw, shadow_x, char_y, f_i + 1, mood=mood, is_shadow=True)
+
+        if prop != "none":
+            draw_prop(draw, char_x, char_y, prop, f_i)
+
+        # رسم الكبسولة الملونة والترجمة أسفل المشهد
+        if caption_text:
+            cap_y = 1360
+            # كبسولة متدرجة (أخضر إلى بنفسجي) خلف الكلمة المميزة أو العبارة
+            pill_w = min(max(len(highlight_word or caption_text) * 44 + 60, 220), 680)
+            pill_x0 = (W - pill_w) // 2 + int(math.sin(f_i * 0.6) * 14)
+            pill_y0 = cap_y + 12
+            pill_x1 = pill_x0 + pill_w
+            pill_y1 = pill_y0 + 105
+
+            for px_step in range(pill_x0, pill_x1, 4):
+                ratio = (px_step - pill_x0) / max(pill_w, 1)
+                r_c = int(126 + ratio * 54)
+                g_c = int(206 - ratio * 56)
+                b_c = int(156 + ratio * 74)
+                draw.rectangle([px_step, pill_y0, min(px_step + 4, pill_x1), pill_y1], fill=(r_c, g_c, b_c))
+
+            draw.rounded_rectangle(
+                [pill_x0, pill_y0, pill_x1, pill_y1],
+                radius=22,
+                outline=(255, 255, 255),
+                width=3,
+            )
+
+            bbox = draw.textbbox((0, 0), caption_text, font=font_cap)
+            tw = bbox[2] - bbox[0]
+            tx = (W - tw) // 2
+            ty = cap_y + 24
+
+            # حافة سوداء واضحة حول النص
+            for ox in range(-4, 5, 2):
+                for oy in range(-4, 5, 2):
+                    if ox != 0 or oy != 0:
+                        draw.text((tx + ox, ty + oy), caption_text, font=font_cap, fill=(10, 10, 16))
+            draw.text((tx, ty), caption_text, font=font_cap, fill=(255, 255, 255))
+
+        frame_path = OUT_DIR / f"beat_{beat_idx:02d}_f{f_i:03d}.png"
+        img.save(frame_path)
+        out_frames.append(frame_path)
+
+    return out_frames
+
+
+async def generate_voice_for_beats(beats: list[dict], audio_path: Path) -> list[float]:
+    durations: list[float] = []
+    part_files: list[Path] = []
+    voice = "ar-SA-HamedNeural"
+
+    for idx, b in enumerate(beats):
+        line = str(b.get("caption", "")).strip() or "ملفات سرية"
+        part_p = OUT_DIR / f"voice_part_{idx:02d}.mp3"
+        comm = edge_tts.Communicate(text=line, voice=voice, rate="+0%")
+        with open(part_p, "wb") as f:
+            async for chunk in comm.stream():
+                if chunk["type"] == "audio":
+                    f.write(chunk["data"])
+        part_files.append(part_p)
+        durations.append(get_audio_duration(part_p))
+
+    concat_list = OUT_DIR / "audio_parts.txt"
+    with open(concat_list, "w", encoding="utf-8") as f:
+        for p in part_files:
+            f.write(f"file '{p.resolve()}'\n")
+
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(concat_list),
+            "-c:a",
+            "libmp3lame",
+            "-b:a",
+            "192k",
+            str(audio_path),
+        ],
+        check=True,
+    )
+    return durations
 
 
 def get_audio_duration(audio_path: Path) -> float:
@@ -232,21 +624,38 @@ def get_audio_duration(audio_path: Path) -> float:
         str(audio_path),
     ]
     res = subprocess.run(cmd, capture_output=True, text=True, check=True)
-    return max(float(res.stdout.strip()), 8.0)
+    return max(float(res.stdout.strip()), 1.0)
 
 
-def render_short_video(scene_paths: list[Path], audio_path: Path, srt_path: Path, out_video: Path) -> None:
-    duration = get_audio_duration(audio_path)
-    per_scene = max(duration / max(len(scene_paths), 1), 2.0)
+def create_thumbnail(first_frame: Path, thumb_text: str, out_thumb: Path) -> None:
+    im = Image.open(first_frame).convert("RGB").resize((W, H), Image.Resampling.NEAREST)
+    draw = ImageDraw.Draw(im)
+    draw.rectangle([0, 1520, W, H], fill=(12, 14, 24))
+    font_t = load_arabic_font(78)
+    bbox = draw.textbbox((0, 0), thumb_text, font=font_t)
+    tw = bbox[2] - bbox[0]
+    tx = (W - tw) // 2
+    draw.text((tx + 4, 1644), thumb_text, font=font_t, fill=(0, 0, 0))
+    draw.text((tx, 1640), thumb_text, font=font_t, fill=(255, 220, 72))
+    im.save(out_thumb)
 
-    concat_list = OUT_DIR / "scenes.txt"
-    with open(concat_list, "w", encoding="utf-8") as f:
-        for p in scene_paths:
-            f.write(f"file '{p.resolve()}'\n")
-            f.write(f"duration {per_scene:.2f}\n")
-        f.write(f"file '{scene_paths[-1].resolve()}'\n")
 
-    silent_video = OUT_DIR / "silent_scenes.mp4"
+def render_video_from_beats(beats: list[dict], beat_durations: list[float], audio_path: Path, out_video: Path) -> None:
+    fps = 12
+    all_frames: list[Path] = []
+    for idx, (beat, dur) in enumerate(zip(beats, beat_durations)):
+        frames = render_beat_frames(beat, idx, dur, fps=fps)
+        all_frames.extend(frames)
+
+    frames_txt = OUT_DIR / "frames.txt"
+    frame_dur = 1.0 / fps
+    with open(frames_txt, "w", encoding="utf-8") as f:
+        for fp in all_frames:
+            f.write(f"file '{fp.resolve()}'\n")
+            f.write(f"duration {frame_dur:.6f}\n")
+        if all_frames:
+            f.write(f"file '{all_frames[-1].resolve()}'\n")
+
     subprocess.run(
         [
             "ffmpeg",
@@ -256,33 +665,13 @@ def render_short_video(scene_paths: list[Path], audio_path: Path, srt_path: Path
             "-safe",
             "0",
             "-i",
-            str(concat_list),
-            "-vf",
-            "scale=1080:1920,format=yuv420p",
-            "-r",
-            "30",
-            "-t",
-            f"{duration:.2f}",
-            str(silent_video),
-        ],
-        check=True,
-    )
-
-    vf_filter = (
-        f"subtitles={srt_path.resolve()}:"
-        "force_style='FontName=DejaVu Sans,FontSize=18,PrimaryColour=&H00FFFFFF,"
-        "OutlineColour=&H00000000,BorderStyle=3,Outline=2'"
-    )
-    subprocess.run(
-        [
-            "ffmpeg",
-            "-y",
-            "-i",
-            str(silent_video),
+            str(frames_txt),
             "-i",
             str(audio_path),
             "-vf",
-            vf_filter,
+            "scale=1080:1920:flags=neighbor,format=yuv420p",
+            "-r",
+            "24",
             "-c:v",
             "libx264",
             "-preset",
@@ -367,33 +756,27 @@ def upload_to_youtube(
 def main() -> None:
     slot = get_slot_number()
     payload = generate_story_payload(slot)
+    beats = payload.get("beats", [])[:8]
 
     formatted_description = build_formatted_description(payload)
     meta = {
         "slot": slot,
         "title": payload.get("title", ""),
         "description": formatted_description,
-        "translation": payload.get("translation", ""),
-        "story": payload.get("story", ""),
+        "beats": beats,
     }
     (OUT_DIR / "metadata.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    scenes = payload.get("scenes", [])[:4]
-    scene_files: list[Path] = []
-    for idx, sc in enumerate(scenes, start=1):
-        p = OUT_DIR / f"scene_{idx}.png"
-        fetch_pixel_scene(str(sc), p)
-        scene_files.append(p)
-
-    thumb_path = OUT_DIR / "thumbnail.png"
-    create_thumbnail(scene_files[0], str(payload.get("thumbnail_text", "PIXEL STORY")), thumb_path)
-
     audio_path = OUT_DIR / "voice.mp3"
-    srt_path = OUT_DIR / "captions.srt"
-    asyncio.run(generate_voice_and_srt(str(payload.get("story", "")), audio_path, srt_path))
+    beat_durations = asyncio.run(generate_voice_for_beats(beats, audio_path))
 
     video_path = OUT_DIR / "short_final.mp4"
-    render_short_video(scene_files, audio_path, srt_path, video_path)
+    render_video_from_beats(beats, beat_durations, audio_path, video_path)
+
+    first_frame = OUT_DIR / "beat_00_f000.png"
+    thumb_path = OUT_DIR / "thumbnail.png"
+    if first_frame.exists():
+        create_thumbnail(first_frame, str(payload.get("thumbnail_text", "ملفات سرية")), thumb_path)
 
     upload_to_youtube(
         video_path=video_path,
@@ -406,7 +789,6 @@ def main() -> None:
 
     print("DONE! Generated:", video_path, thumb_path)
     print("\n--- DESCRIPTION ---\n" + formatted_description)
-    print("\n--- TRANSLATION ---\n" + meta["translation"])
 
 
 if __name__ == "__main__":
