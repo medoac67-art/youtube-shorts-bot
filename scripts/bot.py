@@ -7,6 +7,8 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
+import arabic_reshaper
+from bidi.algorithm import get_display
 import edge_tts
 import requests
 from google.auth.transport.requests import Request
@@ -19,9 +21,20 @@ OUT_DIR = Path("output")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 W, H = 1080, 1920
-# شبكة بكسل حقيقية بأبعاد 18x32 مضروبة في 60 = 1080x1920
 GRID_W, GRID_H = 54, 96
 PX = 20
+PRIVACY_STATUS = "public"
+
+
+def shape_ar(text: str) -> str:
+    clean = str(text or "").strip()
+    if not clean:
+        return ""
+    try:
+        reshaped = arabic_reshaper.reshape(clean)
+        return get_display(reshaped)
+    except Exception:
+        return clean
 
 
 def get_slot_number() -> int:
@@ -44,11 +57,11 @@ def extract_json(text: str) -> dict:
 
 def generate_story_payload(slot: int) -> dict:
     prompt = f"""
-Create a suspenseful short story (#{slot} of 4 daily shorts) for an Arabic mystery YouTube Shorts channel ("ملفات سرية") in the style of retro 2D pixel-art story animations.
+Create a dramatic, fast-paced short mystery story (#{slot} of 4 daily shorts) for an Arabic YouTube Shorts channel ("ملفات سرية") inspired by retro 2D pixel-art story animations.
 Return ONLY valid JSON with this exact structure:
 {{
-  "title": "catchy short Arabic title",
-  "description": "engaging 2-3 sentence hook in Arabic",
+  "title": "عنوان مشوق وقصير",
+  "description": "وصف قصير مشوق من جملتين أو ثلاث باللغة العربية",
   "keywords": ["ملفات سرية", "pixel art", "قصص غموض", "شورتس", "أنيميشن"],
   "hashtags": ["#shorts", "#pixelart", "#ملفات_سرية", "#غموض", "#قصص"],
   "thumbnail_text": "كلمة أو كلمتان",
@@ -58,131 +71,101 @@ Return ONLY valid JSON with this exact structure:
       "highlight_word": "الليل",
       "scene": "alley_night",
       "mood": "neutral",
+      "action": "walk",
       "prop": "none",
       "has_shadow": true
     }},
     {{
-      "caption": "لاحظت ظلا يتحرك",
-      "highlight_word": "ظلا",
+      "caption": "ظهر ظل يتحرك",
+      "highlight_word": "ظل",
       "scene": "alley_night",
       "mood": "surprised",
+      "action": "point",
       "prop": "exclamation",
       "has_shadow": true
     }},
     {{
-      "caption": "يشير نحو باب غامض",
+      "caption": "يشير نحو باب مغلق",
       "highlight_word": "باب",
       "scene": "alley_night",
       "mood": "curious",
+      "action": "point",
       "prop": "idea",
       "has_shadow": true
     }},
     {{
-      "caption": "فتحت الباب ببطء",
-      "highlight_word": "الباب",
+      "caption": "فتحت الباب فجأة",
+      "highlight_word": "فجأة",
       "scene": "corridor",
       "mood": "shocked",
-      "prop": "speech",
+      "action": "alert",
+      "prop": "exclamation",
       "has_shadow": false
     }},
     {{
-      "caption": "وكان الممر طويلا جدا",
-      "highlight_word": "طويلا",
+      "caption": "وكان الممر طويلا",
+      "highlight_word": "الممر",
       "scene": "corridor",
-      "mood": "surprised",
-      "prop": "exclamation",
+      "mood": "curious",
+      "action": "walk",
+      "prop": "speech",
       "has_shadow": true
     }},
     {{
-      "caption": "همس صوت في الظلام",
-      "highlight_word": "الظلام",
+      "caption": "في الصباح تغير كل شيء",
+      "highlight_word": "الصباح",
+      "scene": "street_day",
+      "mood": "happy",
+      "action": "wave",
+      "prop": "idea",
+      "has_shadow": false
+    }},
+    {{
+      "caption": "لكن السر بقي في الغرفة",
+      "highlight_word": "السر",
       "scene": "room_night",
       "mood": "shocked",
+      "action": "alert",
       "prop": "heart",
       "has_shadow": true
     }}
   ]
 }}
 
-Rules for beats:
-- Make 6 to 8 beats that form one coherent, suspenseful Arabic mystery story (about 35-45 seconds when spoken).
-- Each "caption" must be 2 to 5 short Arabic words so subtitles stay crisp and readable.
+Rules:
+- Produce 7 to 8 beats forming a coherent Arabic mystery story (about 30-42 seconds total).
+- Each "caption" must be 2 to 4 short Arabic words.
 - "highlight_word" must be one word from "caption".
 - "scene" must be one of: "alley_night", "corridor", "room_night", "street_day".
 - "mood" must be one of: "neutral", "surprised", "shocked", "happy", "curious".
+- "action" must be one of: "walk", "point", "alert", "wave".
 - "prop" must be one of: "none", "exclamation", "idea", "speech", "heart".
 """
-    openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip()
-    groq_key = os.getenv("GROQ_API_KEY", "").strip()
+    for env_name, url, model in [
+        ("OPENROUTER_API_KEY", "https://openrouter.ai/api/v1/chat/completions", "openrouter/free"),
+        ("GROQ_API_KEY", "https://api.groq.com/openai/v1/chat/completions", "llama-3.3-70b-versatile"),
+        ("ZHIPU_API_KEY", "https://open.bigmodel.cn/api/paas/v4/chat/completions", "glm-4-flash"),
+    ]:
+        key = os.getenv(env_name, "").strip()
+        if not key:
+            continue
+        try:
+            r = requests.post(
+                url,
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                json={"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.8},
+                timeout=45,
+            )
+            if r.ok:
+                data = extract_json(r.json()["choices"][0]["message"]["content"])
+                if isinstance(data.get("beats"), list) and len(data["beats"]) >= 4:
+                    return data
+        except Exception:
+            pass
+
     google_key = os.getenv("GOOGLE_API_KEY", "").strip()
-    zhipu_key = os.getenv("ZHIPU_API_KEY", "").strip()
-
-    try:
-        if openrouter_key:
-            r = requests.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {openrouter_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": "openrouter/free",
-                    "messages": [{"role": "user", "content": prompt}],
-                },
-                timeout=45,
-            )
-            if r.ok:
-                data = extract_json(r.json()["choices"][0]["message"]["content"])
-                if isinstance(data.get("beats"), list) and len(data["beats"]) >= 4:
-                    return data
-    except Exception:
-        pass
-
-    try:
-        if groq_key:
-            r = requests.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {groq_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": "llama-3.3-70b-versatile",
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.75,
-                },
-                timeout=45,
-            )
-            if r.ok:
-                data = extract_json(r.json()["choices"][0]["message"]["content"])
-                if isinstance(data.get("beats"), list) and len(data["beats"]) >= 4:
-                    return data
-    except Exception:
-        pass
-
-    try:
-        if zhipu_key:
-            r = requests.post(
-                "https://open.bigmodel.cn/api/paas/v4/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {zhipu_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": "glm-4-flash",
-                    "messages": [{"role": "user", "content": prompt}],
-                },
-                timeout=45,
-            )
-            if r.ok:
-                data = extract_json(r.json()["choices"][0]["message"]["content"])
-                if isinstance(data.get("beats"), list) and len(data["beats"]) >= 4:
-                    return data
-    except Exception:
-        pass
-
-    try:
-        if google_key:
+    if google_key:
+        try:
             r = requests.post(
                 f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={google_key}",
                 headers={"Content-Type": "application/json"},
@@ -193,72 +176,23 @@ Rules for beats:
                 data = extract_json(r.json()["candidates"][0]["content"]["parts"][0]["text"])
                 if isinstance(data.get("beats"), list) and len(data["beats"]) >= 4:
                     return data
-    except Exception:
-        pass
+        except Exception:
+            pass
 
     return {
-        "title": f"ملف سري #{slot}: ظل في الزقاق",
-        "description": "قصة غموض قصيرة بأسلوب Pixel Art من سلسلة ملفات سرية. ماذا يحدث عندما يتحرك الظل وحده في منتصف الليل؟",
+        "title": f"ملف سري #{slot}: إشارة في منتصف الليل",
+        "description": "قصة غموض بأسلوب Pixel Art من سلسلة ملفات سرية. ما الذي يختبئ خلف الباب في قلب الليل؟",
         "keywords": ["ملفات سرية", "pixel art", "قصص غموض", "شورتس", "أنيميشن"],
         "hashtags": ["#shorts", "#pixelart", "#ملفات_سرية", "#غموض", "#قصص"],
-        "thumbnail_text": "ظل غامض",
+        "thumbnail_text": "ملف سري",
         "beats": [
-            {
-                "caption": "في منتصف الليل",
-                "highlight_word": "الليل",
-                "scene": "alley_night",
-                "mood": "neutral",
-                "prop": "none",
-                "has_shadow": True,
-            },
-            {
-                "caption": "لاحظت ظلي يتحرك",
-                "highlight_word": "ظلي",
-                "scene": "alley_night",
-                "mood": "surprised",
-                "prop": "exclamation",
-                "has_shadow": True,
-            },
-            {
-                "caption": "قبل أن أخطو خطوة",
-                "highlight_word": "خطوة",
-                "scene": "alley_night",
-                "mood": "curious",
-                "prop": "idea",
-                "has_shadow": True,
-            },
-            {
-                "caption": "يشير نحو باب مغلق",
-                "highlight_word": "باب",
-                "scene": "alley_night",
-                "mood": "surprised",
-                "prop": "none",
-                "has_shadow": True,
-            },
-            {
-                "caption": "فتحت الباب فظهر ممر",
-                "highlight_word": "ممر",
-                "scene": "corridor",
-                "mood": "shocked",
-                "prop": "speech",
-                "has_shadow": False,
-            },
-            {
-                "caption": "يتردد فيه صدى خافت",
-                "highlight_word": "صدى",
-                "scene": "corridor",
-                "mood": "curious",
-                "prop": "none",
-                "has_shadow": True,
-            },
-            {
-                "caption": "أدركت أن السر بدأ",
-                "highlight_word": "السر",
-                "scene": "room_night",
-                "mood": "shocked",
-                "prop": "exclamation",
-                "has_shadow": True,
-            },
+            {"caption": "في منتصف الليل", "highlight_word": "الليل", "scene": "alley_night", "mood": "neutral", "action": "walk", "prop": "none", "has_shadow": True},
+            {"caption": "ظهر ظل يتحرك", "highlight_word": "ظل", "scene": "alley_night", "mood": "surprised", "action": "point", "prop": "exclamation", "has_shadow": True},
+            {"caption": "يشير نحو باب مغلق", "highlight_word": "باب", "scene": "alley_night", "mood": "curious", "action": "point", "prop": "idea", "has_shadow": True},
+            {"caption": "فتحت الباب فجأة", "highlight_word": "فجأة", "scene": "corridor", "mood": "shocked", "action": "alert", "prop": "exclamation", "has_shadow": False},
+            {"caption": "وكان الممر طويلا", "highlight_word": "الممر", "scene": "corridor", "mood": "curious", "action": "walk", "prop": "speech", "has_shadow": True},
+            {"caption": "في الصباح تغير كل شيء", "highlight_word": "الصباح", "scene": "street_day", "mood": "happy", "action": "wave", "prop": "idea", "has_shadow": False},
+            {"caption": "لكن السر بقي في الغرفة", "highlight_word": "السر", "scene": "room_night", "mood": "shocked", "action": "alert", "prop": "heart", "has_shadow": True},
         ],
     }
 
@@ -284,81 +218,71 @@ def px_rect(draw: ImageDraw.ImageDraw, x0: int, y0: int, x1: int, y1: int, fill,
 
 
 def draw_alley_night(draw: ImageDraw.ImageDraw, frame_idx: int) -> None:
-    # سماء ليلية ونجوم وقمر
-    px_rect(draw, 0, 0, GRID_W - 1, 18, (24, 24, 52))
-    px_rect(draw, 0, 19, GRID_W - 1, 24, (38, 32, 68))
-    # قمر
+    px_rect(draw, 0, 0, GRID_W - 1, 18, (22, 24, 52))
+    px_rect(draw, 0, 19, GRID_W - 1, 24, (36, 32, 68))
     px_rect(draw, 8, 5, 13, 10, (245, 238, 185))
     px_rect(draw, 9, 6, 12, 9, (255, 250, 210))
-    # نجوم متقطعة
+
     stars = [(3, 4), (17, 7), (25, 3), (34, 9), (42, 5), (48, 12), (21, 13), (6, 15)]
     for idx_s, (sx, sy) in enumerate(stars):
-        if (frame_idx + idx_s) % 6 != 0:
-            px_rect(draw, sx, sy, sx, sy, (235, 235, 250))
+        if (frame_idx + idx_s) % 5 != 0:
+            px_rect(draw, sx, sy, sx, sy, (238, 240, 255))
 
-    # أفق المدينة
     for bx in range(0, GRID_W, 9):
         bh = 15 + ((bx * 3) % 5)
-        px_rect(draw, bx, 25 - bh, bx + 7, 24, (20, 18, 38))
+        px_rect(draw, bx, 25 - bh, bx + 7, 24, (18, 18, 36))
 
-    # جدار الطوب الأحمر
-    px_rect(draw, 0, 25, GRID_W - 1, 66, (158, 72, 62))
+    px_rect(draw, 0, 25, GRID_W - 1, 66, (154, 70, 60))
     for row in range(26, 66, 3):
         offset = 0 if ((row // 3) % 2 == 0) else 2
         for col in range(offset, GRID_W, 5):
             px_rect(draw, col, row, col + 3, row + 1, (176, 84, 72))
-            px_rect(draw, col, row + 2, col + 3, row + 2, (112, 46, 42))
+            px_rect(draw, col, row + 2, col + 3, row + 2, (108, 44, 40))
 
-    # نافذة خشبية مغلقة على الجدار
-    px_rect(draw, 33, 33, 43, 44, (78, 44, 30), outline=(22, 18, 24))
+    px_rect(draw, 33, 33, 43, 44, (74, 42, 28), outline=(20, 18, 24))
     for wy in range(34, 44, 3):
         px_rect(draw, 34, wy, 42, wy + 1, (138, 86, 48))
 
-    # عمود إنارة ومصباح دافئ
     px_rect(draw, 16, 26, 17, 66, (52, 56, 72), outline=(18, 18, 24))
     px_rect(draw, 14, 26, 22, 27, (52, 56, 72), outline=(18, 18, 24))
-    lamp_col = (255, 220, 120) if (frame_idx % 8 != 0) else (190, 165, 95)
+    lamp_col = (255, 222, 122) if (frame_idx % 7 != 0) else (190, 165, 95)
     px_rect(draw, 18, 28, 21, 30, lamp_col)
 
-    # رصيف وطريق مرصوف
     px_rect(draw, 0, 67, GRID_W - 1, 71, (98, 96, 114))
     px_rect(draw, 0, 72, GRID_W - 1, GRID_H - 1, (72, 70, 92))
     for py in range(73, GRID_H - 1, 4):
         for px_i in range(2, GRID_W - 2, 6):
             shift = (px_i + py) % 3
             px_rect(draw, px_i + shift, py, px_i + shift + 2, py + 1, (88, 86, 110))
-    # بركة ماء صغيرة
     px_rect(draw, 31, 76, 41, 79, (56, 72, 118))
     px_rect(draw, 34, 77, 38, 78, (125, 155, 215))
 
 
 def draw_corridor(draw: ImageDraw.ImageDraw, frame_idx: int) -> None:
-    # ممر عميق بإضاءة سقف متدرجة
-    px_rect(draw, 0, 0, GRID_W - 1, 14, (52, 56, 96))
-    px_rect(draw, 0, 15, GRID_W - 1, 68, (66, 72, 118))
+    px_rect(draw, 0, 0, GRID_W - 1, 14, (50, 56, 96))
+    px_rect(draw, 0, 15, GRID_W - 1, 68, (64, 72, 118))
     px_rect(draw, 0, 69, GRID_W - 1, GRID_H - 1, (92, 96, 138))
 
-    # إضاءات السقف المتناقصة نحو العمق
-    lights = [(22, 16, 31, 20, (250, 238, 175)), (24, 26, 29, 28, (230, 220, 165)), (25, 33, 28, 34, (205, 200, 160))]
+    lights = [
+        (22, 16, 31, 20, (252, 240, 178)),
+        (24, 26, 29, 28, (232, 222, 166)),
+        (25, 33, 28, 34, (206, 200, 160)),
+    ]
     for x0, y0, x1, y1, col in lights:
         px_rect(draw, x0, y0, x1, y1, col)
 
-    # أبواب جانبية في الممر
     px_rect(draw, 6, 30, 13, 66, (44, 112, 118), outline=(20, 22, 34))
     px_rect(draw, 40, 30, 47, 66, (44, 112, 118), outline=(20, 22, 34))
-    # باب مفتوح جزئياً في المقدمة اليسرى
     swing = (frame_idx // 4) % 2
     px_rect(draw, 1, 20, 6 + swing, 68, (54, 132, 138), outline=(18, 20, 32))
 
 
 def draw_room_night(draw: ImageDraw.ImageDraw, frame_idx: int) -> None:
-    # غرفة خشبية ليلية بنافذة تطل على السماء
     px_rect(draw, 0, 0, GRID_W - 1, 68, (96, 62, 42))
     for wx in range(0, GRID_W, 6):
         px_rect(draw, wx, 0, wx + 4, 68, (112, 74, 50))
     px_rect(draw, 0, 69, GRID_W - 1, GRID_H - 1, (76, 48, 32))
 
-    # نافذة
     px_rect(draw, 33, 18, 45, 34, (24, 28, 56), outline=(25, 18, 14))
     px_rect(draw, 39, 18, 39, 34, (45, 32, 24))
     px_rect(draw, 33, 26, 45, 26, (45, 32, 24))
@@ -368,24 +292,19 @@ def draw_room_night(draw: ImageDraw.ImageDraw, frame_idx: int) -> None:
 
 
 def draw_street_day(draw: ImageDraw.ImageDraw, frame_idx: int) -> None:
-    # سماء نهارية وغيوم ومبانٍ وطريق
     px_rect(draw, 0, 0, GRID_W - 1, 34, (118, 194, 245))
-    # غيوم
     cloud_x = 6 + (frame_idx % 12)
     px_rect(draw, cloud_x, 7, cloud_x + 7, 9, (245, 250, 255))
     px_rect(draw, cloud_x + 2, 5, cloud_x + 5, 7, (245, 250, 255))
 
-    # عمارات
     px_rect(draw, 4, 14, 18, 52, (150, 168, 196), outline=(30, 36, 50))
     px_rect(draw, 22, 10, 36, 52, (198, 142, 118), outline=(30, 36, 50))
     px_rect(draw, 39, 18, 52, 52, (124, 152, 184), outline=(30, 36, 50))
 
-    # نوافذ مضاءة
     for wy in range(16, 48, 6):
         for wx in [7, 13, 25, 31, 42, 47]:
             px_rect(draw, wx, wy, wx + 2, wy + 3, (255, 236, 150))
 
-    # رصيف وطريق
     px_rect(draw, 0, 53, GRID_W - 1, 60, (176, 178, 188))
     px_rect(draw, 0, 61, GRID_W - 1, 74, (68, 72, 82))
     for rx in range(2, GRID_W, 8):
@@ -399,6 +318,7 @@ def draw_character(
     cy: int,
     step_phase: int,
     mood: str = "neutral",
+    action: str = "walk",
     shirt_color=(102, 112, 212),
     is_shadow: bool = False,
 ) -> None:
@@ -416,11 +336,9 @@ def draw_character(
         pants_c = (48, 56, 86)
         eye_c = (20, 20, 28)
 
-    # الرأس والشعر
     px_rect(draw, cx - 4, cy - 16, cx + 4, cy - 8, skin_c, outline=outline)
     px_rect(draw, cx - 4, cy - 17, cx + 4, cy - 13, hair_c, outline=outline)
 
-    # العيون والفم حسب المزاج
     if mood == "shocked":
         px_rect(draw, cx - 3, cy - 12, cx - 2, cy - 10, (255, 255, 255))
         px_rect(draw, cx + 2, cy - 12, cx + 3, cy - 10, (255, 255, 255))
@@ -440,13 +358,22 @@ def draw_character(
         px_rect(draw, cx + 2, cy - 11, cx + 2, cy - 11, eye_c)
         px_rect(draw, cx - 1, cy - 9, cx + 1, cy - 9, (90, 58, 52))
 
-    # الجذع والذراعان
     px_rect(draw, cx - 4, cy - 7, cx + 4, cy - 1, shirt_c, outline=outline)
-    arm_lift = -1 if (step_phase % 2 == 1 and mood in ("surprised", "shocked")) else 0
-    px_rect(draw, cx - 6, cy - 7 + arm_lift, cx - 5, cy - 2 + arm_lift, shirt_c, outline=outline)
-    px_rect(draw, cx + 5, cy - 7 + arm_lift, cx + 6, cy - 2 + arm_lift, shirt_c, outline=outline)
 
-    # القدمان بحركة مشي بسيطة
+    if action == "point":
+        px_rect(draw, cx - 6, cy - 7, cx - 5, cy - 2, shirt_c, outline=outline)
+        px_rect(draw, cx + 5, cy - 9, cx + 8, cy - 8, shirt_c, outline=outline)
+    elif action == "wave":
+        w = (step_phase % 2) * -1
+        px_rect(draw, cx - 6, cy - 7, cx - 5, cy - 2, shirt_c, outline=outline)
+        px_rect(draw, cx + 5, cy - 10 + w, cx + 6, cy - 5 + w, shirt_c, outline=outline)
+    elif action == "alert":
+        px_rect(draw, cx - 6, cy - 9, cx - 5, cy - 5, shirt_c, outline=outline)
+        px_rect(draw, cx + 5, cy - 9, cx + 6, cy - 5, shirt_c, outline=outline)
+    else:
+        px_rect(draw, cx - 6, cy - 7, cx - 5, cy - 2, shirt_c, outline=outline)
+        px_rect(draw, cx + 5, cy - 7, cx + 6, cy - 2, shirt_c, outline=outline)
+
     left_y = cy if (step_phase % 2 == 0) else cy - 1
     right_y = cy - 1 if (step_phase % 2 == 0) else cy
     px_rect(draw, cx - 3, left_y, cx - 1, cy + 2, pants_c, outline=outline)
@@ -493,12 +420,15 @@ def render_beat_frames(beat: dict, beat_idx: int, duration_sec: float, fps: int 
     num_frames = max(int(round(duration_sec * fps)), 8)
     scene_name = str(beat.get("scene", "alley_night")).strip()
     mood = str(beat.get("mood", "neutral")).strip()
+    action = str(beat.get("action", "walk")).strip()
     prop = str(beat.get("prop", "none")).strip()
     has_shadow = bool(beat.get("has_shadow", True))
-    caption_text = str(beat.get("caption", "")).strip()
-    highlight_word = str(beat.get("highlight_word", "")).strip()
+    caption_raw = str(beat.get("caption", "")).strip()
+    highlight_raw = str(beat.get("highlight_word", "")).strip()
 
-    font_cap = load_arabic_font(62)
+    shaped_caption = shape_ar(caption_raw)
+    shaped_highlight = shape_ar(highlight_raw or caption_raw)
+    font_cap = load_arabic_font(64)
     out_frames: list[Path] = []
 
     for f_i in range(num_frames):
@@ -514,28 +444,44 @@ def render_beat_frames(beat: dict, beat_idx: int, duration_sec: float, fps: int 
         else:
             draw_alley_night(draw, f_i)
 
-        # حركة الشخصية والظل داخل المشهد
-        drift = int(math.sin((f_i / max(num_frames, 1)) * math.pi) * 3)
+        drift = int(math.sin((f_i / max(num_frames, 1)) * math.pi) * 4)
         char_x = 16 + drift
         char_y = 69
-        draw_character(draw, char_x, char_y, f_i, mood=mood, shirt_color=(102, 112, 212), is_shadow=False)
+        draw_character(
+            draw,
+            char_x,
+            char_y,
+            f_i,
+            mood=mood,
+            action=action,
+            shirt_color=(102, 112, 212),
+            is_shadow=False,
+        )
 
         if has_shadow:
             shadow_x = 34 - (drift // 2)
-            draw_character(draw, shadow_x, char_y, f_i + 1, mood=mood, is_shadow=True)
+            draw_character(
+                draw,
+                shadow_x,
+                char_y,
+                f_i + 1,
+                mood=mood,
+                action=action,
+                is_shadow=True,
+            )
 
         if prop != "none":
             draw_prop(draw, char_x, char_y, prop, f_i)
 
-        # رسم الكبسولة الملونة والترجمة أسفل المشهد
-        if caption_text:
+        if shaped_caption:
             cap_y = 1360
-            # كبسولة متدرجة (أخضر إلى بنفسجي) خلف الكلمة المميزة أو العبارة
-            pill_w = min(max(len(highlight_word or caption_text) * 44 + 60, 220), 680)
+            hl_bbox = draw.textbbox((0, 0), shaped_highlight, font=font_cap)
+            hl_w = max((hl_bbox[2] - hl_bbox[0]) + 56, 200)
+            pill_w = min(hl_w, 720)
             pill_x0 = (W - pill_w) // 2 + int(math.sin(f_i * 0.6) * 14)
-            pill_y0 = cap_y + 12
+            pill_y0 = cap_y + 10
             pill_x1 = pill_x0 + pill_w
-            pill_y1 = pill_y0 + 105
+            pill_y1 = pill_y0 + 108
 
             for px_step in range(pill_x0, pill_x1, 4):
                 ratio = (px_step - pill_x0) / max(pill_w, 1)
@@ -551,23 +497,37 @@ def render_beat_frames(beat: dict, beat_idx: int, duration_sec: float, fps: int 
                 width=3,
             )
 
-            bbox = draw.textbbox((0, 0), caption_text, font=font_cap)
+            bbox = draw.textbbox((0, 0), shaped_caption, font=font_cap)
             tw = bbox[2] - bbox[0]
             tx = (W - tw) // 2
-            ty = cap_y + 24
+            ty = cap_y + 22
 
-            # حافة سوداء واضحة حول النص
             for ox in range(-4, 5, 2):
                 for oy in range(-4, 5, 2):
                     if ox != 0 or oy != 0:
-                        draw.text((tx + ox, ty + oy), caption_text, font=font_cap, fill=(10, 10, 16))
-            draw.text((tx, ty), caption_text, font=font_cap, fill=(255, 255, 255))
+                        draw.text((tx + ox, ty + oy), shaped_caption, font=font_cap, fill=(10, 10, 16))
+            draw.text((tx, ty), shaped_caption, font=font_cap, fill=(255, 255, 255))
 
         frame_path = OUT_DIR / f"beat_{beat_idx:02d}_f{f_i:03d}.png"
         img.save(frame_path)
         out_frames.append(frame_path)
 
     return out_frames
+
+
+def get_audio_duration(audio_path: Path) -> float:
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(audio_path),
+    ]
+    res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    return max(float(res.stdout.strip()), 1.0)
 
 
 async def generate_voice_for_beats(beats: list[dict], audio_path: Path) -> list[float]:
@@ -612,31 +572,17 @@ async def generate_voice_for_beats(beats: list[dict], audio_path: Path) -> list[
     return durations
 
 
-def get_audio_duration(audio_path: Path) -> float:
-    cmd = [
-        "ffprobe",
-        "-v",
-        "error",
-        "-show_entries",
-        "format=duration",
-        "-of",
-        "default=noprint_wrappers=1:nokey=1",
-        str(audio_path),
-    ]
-    res = subprocess.run(cmd, capture_output=True, text=True, check=True)
-    return max(float(res.stdout.strip()), 1.0)
-
-
 def create_thumbnail(first_frame: Path, thumb_text: str, out_thumb: Path) -> None:
     im = Image.open(first_frame).convert("RGB").resize((W, H), Image.Resampling.NEAREST)
     draw = ImageDraw.Draw(im)
     draw.rectangle([0, 1520, W, H], fill=(12, 14, 24))
+    shaped_thumb = shape_ar(thumb_text)
     font_t = load_arabic_font(78)
-    bbox = draw.textbbox((0, 0), thumb_text, font=font_t)
+    bbox = draw.textbbox((0, 0), shaped_thumb, font=font_t)
     tw = bbox[2] - bbox[0]
     tx = (W - tw) // 2
-    draw.text((tx + 4, 1644), thumb_text, font=font_t, fill=(0, 0, 0))
-    draw.text((tx, 1640), thumb_text, font=font_t, fill=(255, 220, 72))
+    draw.text((tx + 4, 1644), shaped_thumb, font=font_t, fill=(0, 0, 0))
+    draw.text((tx, 1640), shaped_thumb, font=font_t, fill=(255, 220, 72))
     im.save(out_thumb)
 
 
@@ -693,7 +639,7 @@ def upload_to_youtube(
     title: str,
     description: str,
     keywords: list[str],
-    privacy_status: str = "unlisted",
+    privacy_status: str = PRIVACY_STATUS,
 ) -> str | None:
     client_id = os.getenv("YT_CLIENT_ID", "").strip()
     client_secret = os.getenv("YT_CLIENT_SECRET", "").strip()
@@ -749,7 +695,7 @@ def upload_to_youtube(
         except Exception as e:
             print("Thumbnail upload note:", e)
 
-    print("Uploaded to YouTube! Video ID:", video_id)
+    print("Uploaded to YouTube! Video ID:", video_id, "Privacy:", privacy_status)
     return video_id
 
 
@@ -784,7 +730,7 @@ def main() -> None:
         title=str(meta["title"]),
         description=formatted_description,
         keywords=payload.get("keywords", []),
-        privacy_status="unlisted",
+        privacy_status=PRIVACY_STATUS,
     )
 
     print("DONE! Generated:", video_path, thumb_path)
