@@ -31,10 +31,152 @@ GRID_W, GRID_H = 72, 128
 PX = 15
 PRIVACY_STATUS = "public"
 
+COMMON_AR_FIXES = {
+    "اذا": "إذا",
+    "الى": "إلى",
+    "الي": "إلى",
+    "او": "أو",
+    "الا": "إلا",
+    "احد": "أحد",
+    "اشياء": "أشياء",
+    "اكثر": "أكثر",
+    "اقل": "أقل",
+    "امام": "أمام",
+    "وراء": "وراء",
+    "علي": "على",
+    "متي": "متى",
+    "حدي": "حتى",
+    "حتي": "حتى",
+    "لؤلؤ": "لؤلؤ",
+    "مسؤل": "مسؤول",
+    "سؤال": "سؤال",
+    "فجأه": "فجأة",
+    "ظلاما": "ظلاماً",
+    "شيئا": "شيئاً",
+    "صوتا": "صوتاً",
+    "بابا": "باباً",
+    "سرا": "سراً",
+    "ليلا": "ليلاً",
+    "صباحا": "صباحاً",
+}
 
-def clean_ar_text(text: str) -> str:
-    no_diacritics = re.sub(r"[\u064B-\u065F\u0670]", "", str(text or ""))
-    return re.sub(r"\s+", " ", no_diacritics).strip()
+
+def fix_arabic_spelling(text: str) -> str:
+    # إزالة التشكيل الزائد وتوحيد المسافات
+    cleaned = re.sub(r"[\u064B-\u065F\u0670]", "", str(text or ""))
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if not cleaned:
+        return ""
+
+    # تصحيح كلمات شائعة بدقة حدود الكلمة
+    for wrong, right in COMMON_AR_FIXES.items():
+        cleaned = re.sub(rf"(?<!\S){re.escape(wrong)}(?!\S)", right, cleaned)
+
+    # إزالة المسافات الزائدة قبل علامات الترقيم
+    cleaned = re.sub(r"\s+([،.!?؛:])", r"\1", cleaned)
+    cleaned = re.sub(r"([،.!?؛:])([^\s\d])", r"\1 \2", cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def call_llm_raw(prompt: str, temperature: float = 0.85) -> str | None:
+    for env_name, url, model in [
+        ("GROQ_API_KEY", "https://api.groq.com/openai/v1/chat/completions", "llama-3.3-70b-versatile"),
+        ("OPENROUTER_API_KEY", "https://openrouter.ai/api/v1/chat/completions", "openrouter/free"),
+        ("ZHIPU_API_KEY", "https://open.bigmodel.cn/api/paas/v4/chat/completions", "glm-4-flash"),
+    ]:
+        key = os.getenv(env_name, "").strip()
+        if not key:
+            continue
+        try:
+            r = requests.post(
+                url,
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                json={"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": temperature},
+                timeout=60,
+            )
+            if r.ok:
+                content = r.json()["choices"][0]["message"]["content"]
+                if content and content.strip():
+                    return content
+        except Exception:
+            pass
+
+    google_key = os.getenv("GOOGLE_API_KEY", "").strip()
+    if google_key:
+        try:
+            r = requests.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={google_key}",
+                headers={"Content-Type": "application/json"},
+                json={"contents": [{"parts": [{"text": prompt}]}]},
+                timeout=60,
+            )
+            if r.ok:
+                content = r.json()["candidates"][0]["content"]["parts"][0]["text"]
+                if content and content.strip():
+                    return content
+        except Exception:
+            pass
+
+    return None
+
+
+def extract_json(text: str) -> dict:
+    cleaned = re.sub(r"```json|```", "", text, flags=re.IGNORECASE).strip()
+    match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
+    raw = match.group(0) if match else cleaned
+    return json.loads(raw)
+
+
+def polish_arabic_payload(payload: dict) -> dict:
+    title_in = fix_arabic_spelling(payload.get("title", ""))
+    desc_in = fix_arabic_spelling(payload.get("description", ""))
+    thumb_in = fix_arabic_spelling(payload.get("thumbnail_text", ""))
+    beats_in = payload.get("beats", [])
+
+    # تطبيق التصحيح السريع أولاً
+    for b in beats_in:
+        b["caption"] = fix_arabic_spelling(b.get("caption", ""))
+
+    # مراجعة إملائية ولغوية شاملة عبر النموذج إن توفر
+    review_prompt = f"""
+راجع النصوص العربية التالية وصحح جميع الأخطاء الإملائية والنحوية وعلامات الترقيم دون تغيير المعنى أو عدد المقاطع ({len(beats_in)} مقطعاً).
+أعد النتيجة بصيغة JSON فقط بنفس المفاتيح:
+{{
+  "title": "...",
+  "description": "...",
+  "thumbnail_text": "...",
+  "captions": ["...", "..."]
+}}
+
+المدخلات:
+{json.dumps({"title": title_in, "description": desc_in, "thumbnail_text": thumb_in, "captions": [b.get("caption", "") for b in beats_in]}, ensure_ascii=False)}
+"""
+    raw_rev = call_llm_raw(review_prompt, temperature=0.2)
+    if raw_rev:
+        try:
+            rev = extract_json(raw_rev)
+            if fix_arabic_spelling(rev.get("title", "")):
+                payload["title"] = fix_arabic_spelling(rev["title"])
+            if fix_arabic_spelling(rev.get("description", "")):
+                payload["description"] = fix_arabic_spelling(rev["description"])
+            if fix_arabic_spelling(rev.get("thumbnail_text", "")):
+                payload["thumbnail_text"] = fix_arabic_spelling(rev["thumbnail_text"])
+            rev_caps = rev.get("captions", [])
+            if isinstance(rev_caps, list) and len(rev_caps) == len(beats_in):
+                for idx, cap in enumerate(rev_caps):
+                    fixed_c = fix_arabic_spelling(cap)
+                    if fixed_c:
+                        beats_in[idx]["caption"] = fixed_c
+        except Exception:
+            pass
+
+    payload["title"] = fix_arabic_spelling(payload.get("title", ""))
+    payload["description"] = fix_arabic_spelling(payload.get("description", ""))
+    payload["thumbnail_text"] = fix_arabic_spelling(payload.get("thumbnail_text", ""))
+    for b in beats_in:
+        b["caption"] = fix_arabic_spelling(b.get("caption", ""))
+
+    return payload
 
 
 def load_history() -> list[dict]:
@@ -52,15 +194,15 @@ def save_history(items: list[dict]) -> None:
 
 
 def story_fingerprint(payload: dict) -> str:
-    title = clean_ar_text(payload.get("title", ""))
-    captions = " ".join(clean_ar_text(b.get("caption", "")) for b in payload.get("beats", []))
+    title = fix_arabic_spelling(payload.get("title", ""))
+    captions = " ".join(fix_arabic_spelling(b.get("caption", "")) for b in payload.get("beats", []))
     raw = f"{title} | {captions}".encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
 
 
 def is_duplicate_story(candidate: dict, history: list[dict]) -> bool:
-    cand_title = clean_ar_text(candidate.get("title", ""))
-    cand_text = " ".join(clean_ar_text(b.get("caption", "")) for b in candidate.get("beats", []))
+    cand_title = fix_arabic_spelling(candidate.get("title", ""))
+    cand_text = " ".join(fix_arabic_spelling(b.get("caption", "")) for b in candidate.get("beats", []))
     cand_fp = story_fingerprint(candidate)
 
     if not cand_title or len(cand_text) < 80:
@@ -69,8 +211,8 @@ def is_duplicate_story(candidate: dict, history: list[dict]) -> bool:
     for item in history:
         if item.get("fingerprint") == cand_fp:
             return True
-        old_title = clean_ar_text(item.get("title", ""))
-        old_text = clean_ar_text(item.get("summary_text", ""))
+        old_title = fix_arabic_spelling(item.get("title", ""))
+        old_text = fix_arabic_spelling(item.get("summary_text", ""))
         if old_title and SequenceMatcher(None, cand_title, old_title).ratio() > 0.68:
             return True
         if old_text and SequenceMatcher(None, cand_text, old_text).ratio() > 0.62:
@@ -89,52 +231,16 @@ def get_slot_number() -> int:
     return 4
 
 
-def extract_json(text: str) -> dict:
-    cleaned = re.sub(r"```json|```", "", text, flags=re.IGNORECASE).strip()
-    match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
-    raw = match.group(0) if match else cleaned
-    return json.loads(raw)
-
-
 def call_llm_for_story(prompt: str) -> dict | None:
-    for env_name, url, model in [
-        ("GROQ_API_KEY", "https://api.groq.com/openai/v1/chat/completions", "llama-3.3-70b-versatile"),
-        ("OPENROUTER_API_KEY", "https://openrouter.ai/api/v1/chat/completions", "openrouter/free"),
-        ("ZHIPU_API_KEY", "https://open.bigmodel.cn/api/paas/v4/chat/completions", "glm-4-flash"),
-    ]:
-        key = os.getenv(env_name, "").strip()
-        if not key:
-            continue
-        try:
-            r = requests.post(
-                url,
-                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                json={"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 1.0},
-                timeout=60,
-            )
-            if r.ok:
-                data = extract_json(r.json()["choices"][0]["message"]["content"])
-                if isinstance(data.get("beats"), list) and len(data["beats"]) >= 12:
-                    return data
-        except Exception:
-            pass
-
-    google_key = os.getenv("GOOGLE_API_KEY", "").strip()
-    if google_key:
-        try:
-            r = requests.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={google_key}",
-                headers={"Content-Type": "application/json"},
-                json={"contents": [{"parts": [{"text": prompt}]}]},
-                timeout=60,
-            )
-            if r.ok:
-                data = extract_json(r.json()["candidates"][0]["content"]["parts"][0]["text"])
-                if isinstance(data.get("beats"), list) and len(data["beats"]) >= 12:
-                    return data
-        except Exception:
-            pass
-
+    raw = call_llm_raw(prompt, temperature=1.0)
+    if not raw:
+        return None
+    try:
+        data = extract_json(raw)
+        if isinstance(data.get("beats"), list) and len(data["beats"]) >= 12:
+            return data
+    except Exception:
+        return None
     return None
 
 
@@ -146,19 +252,19 @@ def build_unique_fallback(slot: int, history: list[dict]) -> dict:
     time_of_day = "night"
     beats = [
         {"caption": "عند منتصف الليل اقترب المحقق من المنارة الساحلية القديمة والبحر يضرب الصخور.", "env": env_kind, "time": time_of_day, "mood": "neutral", "action": "walk", "prop": "none", "has_shadow": False},
-        {"caption": "كانت المنارة مطفأة منذ سنوات طويلة لكن ضوءا خافتا ظهر في نافذتها العليا.", "env": env_kind, "time": time_of_day, "mood": "curious", "action": "point", "prop": "idea", "has_shadow": False},
+        {"caption": "كانت المنارة مطفأة منذ سنوات طويلة، لكن ضوءاً خافتاً ظهر في نافذتها العليا.", "env": env_kind, "time": time_of_day, "mood": "curious", "action": "point", "prop": "idea", "has_shadow": False},
         {"caption": "دفع الباب الخشبي الثقيل فصدر صرير حاد تردد داخل البناء الفارغ.", "env": env_kind, "time": time_of_day, "mood": "surprised", "action": "alert", "prop": "exclamation", "has_shadow": False},
         {"caption": "أشعل مصباحه اليدوي وبدأ يصعد الدرج الحجري الملتف خطوة بعد خطوة.", "env": env_kind, "time": time_of_day, "mood": "curious", "action": "walk", "prop": "none", "has_shadow": False},
         {"caption": "على الجدار الحجري الرطب وجد آثار أقدام حديثة تتجه نحو الأعلى.", "env": env_kind, "time": time_of_day, "mood": "surprised", "action": "point", "prop": "idea", "has_shadow": False},
-        {"caption": "توقف فجأة عندما شعر بأن أحدا يقف خلفه في الظلام.", "env": env_kind, "time": time_of_day, "mood": "shocked", "action": "alert", "prop": "exclamation", "has_shadow": True},
-        {"caption": "استدار بسرعة فلم يجد أحدا لكن خيالا غريبا انعكس على الجدار.", "env": env_kind, "time": time_of_day, "mood": "shocked", "action": "alert", "prop": "exclamation", "has_shadow": True},
+        {"caption": "توقف فجأة عندما شعر بأن أحداً يقف خلفه في الظلام.", "env": env_kind, "time": time_of_day, "mood": "shocked", "action": "alert", "prop": "exclamation", "has_shadow": True},
+        {"caption": "استدار بسرعة فلم يجد أحداً، لكن خيالاً غريباً انعكس على الجدار.", "env": env_kind, "time": time_of_day, "mood": "shocked", "action": "alert", "prop": "exclamation", "has_shadow": True},
         {"caption": "اقترب الخيال ببطء ثم أشار نحو صندوق معدني قديم في الزاوية.", "env": env_kind, "time": time_of_day, "mood": "surprised", "action": "point", "prop": "none", "has_shadow": True},
-        {"caption": "فتح المحقق الصندوق فوجد دفترا قديما يحمل تاريخ آخر ليلة عملت فيها المنارة.", "env": env_kind, "time": time_of_day, "mood": "curious", "action": "point", "prop": "speech", "has_shadow": False},
+        {"caption": "فتح المحقق الصندوق فوجد دفتراً قديماً يحمل تاريخ آخر ليلة عملت فيها المنارة.", "env": env_kind, "time": time_of_day, "mood": "curious", "action": "point", "prop": "speech", "has_shadow": False},
         {"caption": "كانت الصفحات الأخيرة تحذر من أن الضوء لا ينطفئ بل يختبئ.", "env": env_kind, "time": time_of_day, "mood": "shocked", "action": "alert", "prop": "exclamation", "has_shadow": False},
-        {"caption": "وفجأة انطفأ المصباح اليدوي في يده وأصبح المكان غارقا في العتمة.", "env": env_kind, "time": time_of_day, "mood": "shocked", "action": "alert", "prop": "exclamation", "has_shadow": True},
+        {"caption": "وفجأة انطفأ المصباح اليدوي في يده وأصبح المكان غارقاً في العتمة.", "env": env_kind, "time": time_of_day, "mood": "shocked", "action": "alert", "prop": "exclamation", "has_shadow": True},
         {"caption": "سمع صوت همس خافت يطلب منه ألا ينظر نحو البحر.", "env": env_kind, "time": time_of_day, "mood": "shocked", "action": "alert", "prop": "speech", "has_shadow": True},
         {"caption": "رفع رأسه نحو النافذة ليرى سفينة قديمة تتحرك بلا أضواء وسط الضباب.", "env": env_kind, "time": "fog", "mood": "shocked", "action": "point", "prop": "exclamation", "has_shadow": False},
-        {"caption": "وعندما عاد لينظر إلى الدفتر كانت الصفحة الأخيرة قد اختفت تماما.", "env": env_kind, "time": "night", "mood": "surprised", "action": "alert", "prop": "none", "has_shadow": True},
+        {"caption": "وعندما عاد لينظر إلى الدفتر كانت الصفحة الأخيرة قد اختفت تماماً.", "env": env_kind, "time": "night", "mood": "surprised", "action": "alert", "prop": "none", "has_shadow": True},
     ]
     return {
         "title": f"ملف سري #{idx} [{run_id}]: سر {place_ar}",
@@ -172,13 +278,13 @@ def build_unique_fallback(slot: int, history: list[dict]) -> dict:
 
 def generate_unique_story_payload(slot: int, history: list[dict]) -> dict:
     now_utc = datetime.now(timezone.utc)
-    recent_titles = [clean_ar_text(h.get("title", "")) for h in history[-30:] if h.get("title")]
+    recent_titles = [fix_arabic_spelling(h.get("title", "")) for h in history[-30:] if h.get("title")]
     avoid_block = "\n".join(f"- {t}" for t in recent_titles) if recent_titles else "- لا توجد قصص سابقة بعد"
 
     for attempt in range(4):
         nonce = uuid.uuid4().hex[:8]
         prompt = f"""
-ابتكر قصة غموض عربية مترابطة ومشوقة وطويلة نسبياً لقناة يوتيوب شورتس ("ملفات سرية").
+ابتكر قصة غموض عربية مترابطة ومشوقة وطويلة نسبياً لقناة يوتيوب شورتس ("ملفات سرية") بإملاء عربي فصيح سليم وخالٍ من الأخطاء الإملائية.
 معرف الجلسة: {nonce} | المحاولة: {attempt + 1} | التاريخ: {now_utc.strftime("%Y-%m-%d %H:%M")} UTC | الفترة: #{slot}.
 
 المدة المطلوبة عند القراءة الصوتية: من 45 إلى 60 ثانية (14 إلى 15 مقطعاً متسلسلاً).
@@ -188,14 +294,14 @@ def generate_unique_story_payload(slot: int, history: list[dict]) -> dict:
 
 أعد النتيجة بصيغة JSON فقط بهذا الشكل:
 {{
-  "title": "عنوان مشوق يعبر عن القصة كاملة",
-  "description": "وصف مشوق من جملتين باللغة العربية",
+  "title": "عنوان مشوق بإملاء سليم",
+  "description": "وصف مشوق من جملتين باللغة العربية بإملاء سليم",
   "keywords": ["ملفات سرية", "pixel art", "قصص غموض", "شورتس", "قصة جديدة"],
   "hashtags": ["#shorts", "#pixelart", "#ملفات_سرية", "#غموض", "#قصص"],
   "thumbnail_text": "كلمتان",
   "beats": [
     {{
-      "caption": "جملة مترابطة واضحة من 8 إلى 13 كلمة بدون تشكيل",
+      "caption": "جملة مترابطة واضحة بإملاء صحيح من 8 إلى 13 كلمة",
       "env": "lighthouse",
       "time": "night",
       "mood": "neutral",
@@ -208,8 +314,7 @@ def generate_unique_story_payload(slot: int, history: list[dict]) -> dict:
 
 القواعد الصارمة:
 - عدد المقاطع (beats) يجب أن يكون 14 إلى 15 مقطعاً مترابطاً تحكي قصة واحدة متماسكة من البداية إلى النهاية.
-- كل "caption" جملة عربية مترابطة من 8 إلى 13 كلمة بدون تشكيل.
-- حافظ على وحدة المكان والحدث ولا تغيّر المكان أو المزاج إلا لسبب درامي واضح داخل القصة.
+- التزم بالإملاء العربي الصحيح (الهمزات، الألف المقصورة، التاء المربوطة، وعلامات الترقيم).
 - "env": اختر من ["lighthouse", "forest", "tunnel", "library", "ship", "basement", "alley", "corridor", "room", "street"].
 - "time": اختر من ["night", "fog", "dusk", "day"].
 - "mood": اختر من ["neutral", "surprised", "shocked", "happy", "curious"].
@@ -217,23 +322,25 @@ def generate_unique_story_payload(slot: int, history: list[dict]) -> dict:
 - "prop": اختر من ["none", "exclamation", "idea", "speech", "heart"].
 """
         data = call_llm_for_story(prompt)
-        if data and isinstance(data.get("beats"), list) and len(data["beats"]) >= 12 and not is_duplicate_story(data, history):
+        if data and isinstance(data.get("beats"), list) and len(data["beats"]) >= 12:
             data["beats"] = data["beats"][:15]
-            return data
+            polished = polish_arabic_payload(data)
+            if not is_duplicate_story(polished, history):
+                return polished
 
-    return build_unique_fallback(slot, history)
+    return polish_arabic_payload(build_unique_fallback(slot, history))
 
 
 def build_formatted_description(payload: dict) -> str:
-    desc = clean_ar_text(payload.get("description", ""))
+    desc = fix_arabic_spelling(payload.get("description", ""))
     keywords = payload.get("keywords", [])
     hashtags = payload.get("hashtags", [])
-    kw_text = ", ".join([clean_ar_text(k) for k in keywords if clean_ar_text(k)])
+    kw_text = ", ".join([fix_arabic_spelling(k) for k in keywords if fix_arabic_spelling(k)])
     tags_text = " ".join(
         [
-            t if str(t).strip().startswith("#") else f"#{clean_ar_text(t).replace(' ', '_')}"
+            t if str(t).strip().startswith("#") else f"#{fix_arabic_spelling(t).replace(' ', '_')}"
             for t in hashtags
-            if clean_ar_text(t)
+            if fix_arabic_spelling(t)
         ]
     )
     return f"{desc}\n\nالكلمات المفتاحية:\n{kw_text}\n\n{tags_text}".strip()
@@ -438,7 +545,7 @@ def render_beat_frames(beat: dict, beat_idx: int, duration_sec: float, story_see
     action = str(beat.get("action", "walk")).strip()
     prop = str(beat.get("prop", "none")).strip()
     has_shadow = bool(beat.get("has_shadow", True))
-    caption_raw = clean_ar_text(beat.get("caption", ""))
+    caption_raw = fix_arabic_spelling(beat.get("caption", ""))
 
     shirt_palette = [
         (102, 112, 212),
@@ -529,16 +636,49 @@ def get_audio_duration(audio_path: Path) -> float:
     return max(float(res.stdout.strip()), 1.0)
 
 
+def try_phonon_tts(full_script: str, audio_path: Path) -> bool:
+    phonon_model = os.getenv("PHONON_MODEL", "").strip()
+    if not phonon_model:
+        return False
+    try:
+        import ptts  # type: ignore
+
+        wav_tmp = OUT_DIR / "phonon_raw.wav"
+        tts = ptts.TTS(phonon_model)
+        tts.save(str(wav_tmp), full_script)
+        if wav_tmp.exists() and wav_tmp.stat().st_size > 1024:
+            subprocess.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-i",
+                    str(wav_tmp),
+                    "-c:a",
+                    "libmp3lame",
+                    "-b:a",
+                    "192k",
+                    str(audio_path),
+                ],
+                check=True,
+            )
+            return audio_path.exists() and audio_path.stat().st_size > 1024
+    except Exception as e:
+        print("Phonon TTS fallback note:", e)
+    return False
+
+
 async def generate_continuous_voice(beats: list[dict], audio_path: Path) -> list[float]:
-    lines = [clean_ar_text(b.get("caption", "")) or "ملفات سرية" for b in beats]
+    lines = [fix_arabic_spelling(b.get("caption", "")) or "ملفات سرية" for b in beats]
     full_script = " ".join(lines)
 
-    voice = "ar-SA-HamedNeural"
-    comm = edge_tts.Communicate(text=full_script, voice=voice, rate="+2%")
-    with open(audio_path, "wb") as f:
-        async for chunk in comm.stream():
-            if chunk["type"] == "audio":
-                f.write(chunk["data"])
+    used_phonon = try_phonon_tts(full_script, audio_path)
+    if not used_phonon:
+        voice = "ar-SA-HamedNeural"
+        comm = edge_tts.Communicate(text=full_script, voice=voice, rate="+2%")
+        with open(audio_path, "wb") as f:
+            async for chunk in comm.stream():
+                if chunk["type"] == "audio":
+                    f.write(chunk["data"])
 
     total_dur = get_audio_duration(audio_path)
     weights = [max(len(re.findall(r"\S+", line)), 1) for line in lines]
@@ -550,7 +690,7 @@ def create_thumbnail(first_frame: Path, thumb_text: str, out_thumb: Path) -> Non
     im = Image.open(first_frame).convert("RGB").resize((W, H), Image.Resampling.NEAREST)
     draw = ImageDraw.Draw(im)
     draw.rectangle([0, 1540, W, H], fill=(12, 14, 24))
-    clean_t = clean_ar_text(thumb_text) or "ملف سري"
+    clean_t = fix_arabic_spelling(thumb_text) or "ملف سري"
     font_t = load_arabic_font(72)
     bbox = draw.textbbox((0, 0), clean_t, font=font_t)
     tw = bbox[2] - bbox[0]
@@ -637,10 +777,10 @@ def upload_to_youtube(
 
     youtube = build("youtube", "v3", credentials=creds)
 
-    clean_tags = [clean_ar_text(k).lstrip("#")[:30] for k in keywords if clean_ar_text(k)][:15]
+    clean_tags = [fix_arabic_spelling(k).lstrip("#")[:30] for k in keywords if fix_arabic_spelling(k)][:15]
     body = {
         "snippet": {
-            "title": clean_ar_text(title)[:95],
+            "title": fix_arabic_spelling(title)[:95],
             "description": description[:4900],
             "tags": clean_tags,
             "categoryId": "24",
@@ -682,7 +822,7 @@ def main() -> None:
     formatted_description = build_formatted_description(payload)
     meta = {
         "slot": slot,
-        "title": clean_ar_text(payload.get("title", "")),
+        "title": fix_arabic_spelling(payload.get("title", "")),
         "description": formatted_description,
         "beats": beats,
     }
@@ -712,7 +852,7 @@ def main() -> None:
         {
             "date_utc": datetime.now(timezone.utc).isoformat(),
             "title": meta["title"],
-            "summary_text": " ".join(clean_ar_text(b.get("caption", "")) for b in beats),
+            "summary_text": " ".join(fix_arabic_spelling(b.get("caption", "")) for b in beats),
             "fingerprint": story_fingerprint(payload),
         }
     )
