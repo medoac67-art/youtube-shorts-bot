@@ -32,7 +32,6 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install requests pillow edge-tts google-api-python-client google-auth
-          pip install ptts || true
 
       - name: Run bot script
         env:
@@ -42,8 +41,10 @@ jobs:
           ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
           AGNES_API_KEY: ${{ secrets.AGNES_API_KEY }}
           SAIL_API_KEY: ${{ secrets.SAIL_API_KEY }}
-          PHONON_MODEL: ${{ secrets.PHONON_MODEL }}
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          FISH_API_KEY_1: ${{ secrets.FISH_API_KEY_1 }}
+          FISH_API_KEY_2: ${{ secrets.FISH_API_KEY_2 }}
+          FISH_API_KEY_3: ${{ secrets.FISH_API_KEY_3 }}
+          FISH_API_KEY_4: ${{ secrets.FISH_API_KEY_4 }}
           YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
           YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
           YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
