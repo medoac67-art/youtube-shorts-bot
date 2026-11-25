@@ -1,4 +1,5 @@
 import asyncio
+import base64
 from difflib import SequenceMatcher
 import hashlib
 import json
@@ -31,6 +32,13 @@ GRID_W, GRID_H = 72, 128
 PX = 15
 PRIVACY_STATUS = "public"
 
+DEFAULT_FISH_KEYS = [
+    "sk-fish-6YUfu-lSRlfppfamSTY-NrEAM1Y-D6fp-hMFWbOIfzI",
+    "sk-fish-6iO-qu3Rvu4riNr2yY321BirGup5LPvsu3_pwJNgApE",
+    "sk-fish-3Oojt9SvyaueZKY-Tm38z6i6BT4wRCneQdcWHGL4HUg",
+    "sk-fish-LGMwCDbpMZwCYU_bBXAYOD0V-UKy16Ut3iEfXZ9T3s8",
+]
+
 COMMON_AR_FIXES = {
     "اذا": "إذا",
     "الى": "إلى",
@@ -62,17 +70,14 @@ COMMON_AR_FIXES = {
 
 
 def fix_arabic_spelling(text: str) -> str:
-    # إزالة التشكيل الزائد وتوحيد المسافات
     cleaned = re.sub(r"[\u064B-\u065F\u0670]", "", str(text or ""))
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     if not cleaned:
         return ""
 
-    # تصحيح كلمات شائعة بدقة حدود الكلمة
     for wrong, right in COMMON_AR_FIXES.items():
         cleaned = re.sub(rf"(?<!\S){re.escape(wrong)}(?!\S)", right, cleaned)
 
-    # إزالة المسافات الزائدة قبل علامات الترقيم
     cleaned = re.sub(r"\s+([،.!?؛:])", r"\1", cleaned)
     cleaned = re.sub(r"([،.!?؛:])([^\s\d])", r"\1 \2", cleaned)
     return re.sub(r"\s+", " ", cleaned).strip()
@@ -133,11 +138,9 @@ def polish_arabic_payload(payload: dict) -> dict:
     thumb_in = fix_arabic_spelling(payload.get("thumbnail_text", ""))
     beats_in = payload.get("beats", [])
 
-    # تطبيق التصحيح السريع أولاً
     for b in beats_in:
         b["caption"] = fix_arabic_spelling(b.get("caption", ""))
 
-    # مراجعة إملائية ولغوية شاملة عبر النموذج إن توفر
     review_prompt = f"""
 راجع النصوص العربية التالية وصحح جميع الأخطاء الإملائية والنحوية وعلامات الترقيم دون تغيير المعنى أو عدد المقاطع ({len(beats_in)} مقطعاً).
 أعد النتيجة بصيغة JSON فقط بنفس المفاتيح:
@@ -636,34 +639,117 @@ def get_audio_duration(audio_path: Path) -> float:
     return max(float(res.stdout.strip()), 1.0)
 
 
-def try_phonon_tts(full_script: str, audio_path: Path) -> bool:
-    phonon_model = os.getenv("PHONON_MODEL", "").strip()
-    if not phonon_model:
+def get_fish_api_keys() -> list[str]:
+    keys: list[str] = []
+    for i in range(1, 5):
+        env_val = os.getenv(f"FISH_API_KEY_{i}", "").strip()
+        if env_val:
+            keys.append(env_val)
+    for dk in DEFAULT_FISH_KEYS:
+        if dk and dk not in keys:
+            keys.append(dk)
+    return keys
+
+
+def try_fish_audio_tts(full_script: str, audio_path: Path) -> bool:
+    for idx, api_key in enumerate(get_fish_api_keys(), start=1):
+        try:
+            resp = requests.post(
+                "https://api.fish.audio/v1/tts",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                    "model": "s2.1-pro-free",
+                },
+                json={"text": full_script, "format": "mp3"},
+                timeout=90,
+            )
+            if resp.ok and resp.content and len(resp.content) > 1024:
+                audio_path.write_bytes(resp.content)
+                print(f"TTS succeeded using Fish Audio key #{idx}.")
+                return True
+            print(f"Fish Audio key #{idx} returned status {resp.status_code}; trying next...")
+        except Exception as e:
+            print(f"Fish Audio key #{idx} error: {e}; trying next...")
+    return False
+
+
+def try_google_ai_studio_tts(full_script: str, audio_path: Path) -> bool:
+    google_key = os.getenv("GOOGLE_API_KEY", "").strip()
+    if not google_key:
         return False
     try:
-        import ptts  # type: ignore
-
-        wav_tmp = OUT_DIR / "phonon_raw.wav"
-        tts = ptts.TTS(phonon_model)
-        tts.save(str(wav_tmp), full_script)
-        if wav_tmp.exists() and wav_tmp.stat().st_size > 1024:
-            subprocess.run(
-                [
-                    "ffmpeg",
-                    "-y",
-                    "-i",
-                    str(wav_tmp),
-                    "-c:a",
-                    "libmp3lame",
-                    "-b:a",
-                    "192k",
-                    str(audio_path),
-                ],
-                check=True,
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key={google_key}"
+        payload = {
+            "contents": [{"parts": [{"text": f"اقرأ هذه القصة بوضوح وتشويق باللغة العربية:\n\n{full_script}"}]}],
+            "generationConfig": {
+                "responseModalities": ["AUDIO"],
+                "speechConfig": {
+                    "voiceConfig": {
+                        "prebuiltVoiceConfig": {
+                            "voiceName": "Puck"
+                        }
+                    }
+                },
+            },
+        }
+        r = requests.post(url, json=payload, timeout=90)
+        if r.ok:
+            parts = (
+                r.json()
+                .get("candidates", [{}])[0]
+                .get("content", {})
+                .get("parts", [])
             )
-            return audio_path.exists() and audio_path.stat().st_size > 1024
+            for p in parts:
+                inline = p.get("inlineData") or p.get("inline_data")
+                if inline and inline.get("data"):
+                    raw_audio = base64.b64decode(inline["data"])
+                    tmp_audio = OUT_DIR / "google_tts_raw.bin"
+                    tmp_audio.write_bytes(raw_audio)
+                    mime = str(inline.get("mimeType") or inline.get("mime_type") or "")
+                    if "pcm" in mime.lower() or "l16" in mime.lower():
+                        subprocess.run(
+                            [
+                                "ffmpeg",
+                                "-y",
+                                "-f",
+                                "s16le",
+                                "-ar",
+                                "24000",
+                                "-ac",
+                                "1",
+                                "-i",
+                                str(tmp_audio),
+                                "-c:a",
+                                "libmp3lame",
+                                "-b:a",
+                                "192k",
+                                str(audio_path),
+                            ],
+                            check=True,
+                        )
+                    else:
+                        subprocess.run(
+                            [
+                                "ffmpeg",
+                                "-y",
+                                "-i",
+                                str(tmp_audio),
+                                "-c:a",
+                                "libmp3lame",
+                                "-b:a",
+                                "192k",
+                                str(audio_path),
+                            ],
+                            check=True,
+                        )
+                    if audio_path.exists() and audio_path.stat().st_size > 1024:
+                        print("TTS succeeded using Google AI Studio fallback.")
+                        return True
+        print("Google AI Studio TTS fallback did not return valid audio.")
     except Exception as e:
-        print("Phonon TTS fallback note:", e)
+        print("Google AI Studio TTS error:", e)
     return False
 
 
@@ -671,14 +757,15 @@ async def generate_continuous_voice(beats: list[dict], audio_path: Path) -> list
     lines = [fix_arabic_spelling(b.get("caption", "")) or "ملفات سرية" for b in beats]
     full_script = " ".join(lines)
 
-    used_phonon = try_phonon_tts(full_script, audio_path)
-    if not used_phonon:
-        voice = "ar-SA-HamedNeural"
-        comm = edge_tts.Communicate(text=full_script, voice=voice, rate="+2%")
-        with open(audio_path, "wb") as f:
-            async for chunk in comm.stream():
-                if chunk["type"] == "audio":
-                    f.write(chunk["data"])
+    if not try_fish_audio_tts(full_script, audio_path):
+        if not try_google_ai_studio_tts(full_script, audio_path):
+            voice = "ar-SA-HamedNeural"
+            comm = edge_tts.Communicate(text=full_script, voice=voice, rate="+2%")
+            with open(audio_path, "wb") as f:
+                async for chunk in comm.stream():
+                    if chunk["type"] == "audio":
+                        f.write(chunk["data"])
+            print("TTS succeeded using Edge-TTS fallback.")
 
     total_dur = get_audio_duration(audio_path)
     weights = [max(len(re.findall(r"\S+", line)), 1) for line in lines]
