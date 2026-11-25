@@ -18,7 +18,7 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 OUT_DIR = Path("output")
 DATA_DIR = Path("data")
@@ -38,6 +38,31 @@ DEFAULT_FISH_KEYS = [
     "sk-fish-3Oojt9SvyaueZKY-Tm38z6i6BT4wRCneQdcWHGL4HUg",
     "sk-fish-LGMwCDbpMZwCYU_bBXAYOD0V-UKy16Ut3iEfXZ9T3s8",
 ]
+
+EMOTE_ALIAS_MAP = {
+    "lauging": "laughing",
+    "laugh": "laughing",
+    "laughs": "laughing",
+    "giggle": "laughing",
+    "whisper": "whispering",
+    "sigh": "sighing",
+    "gasp": "gasping",
+    "scream": "shouting",
+    "shout": "shouting",
+}
+
+ALLOWED_EMOTES = {
+    "laughing",
+    "whispering",
+    "sighing",
+    "gasping",
+    "shouting",
+    "excited",
+    "surprised",
+    "sad",
+    "angry",
+    "nervous",
+}
 
 COMMON_AR_FIXES = {
     "اذا": "إذا",
@@ -67,6 +92,49 @@ COMMON_AR_FIXES = {
     "ليلا": "ليلاً",
     "صباحا": "صباحاً",
 }
+
+
+def normalize_emote_name(raw_tag: str) -> str:
+    tag = re.sub(r"[^a-zA-Z0-9_\-\s]", "", str(raw_tag or "")).strip().lower()
+    tag = re.sub(r"\s+", " ", tag)
+    if tag in EMOTE_ALIAS_MAP:
+        tag = EMOTE_ALIAS_MAP[tag]
+    return tag if tag in ALLOWED_EMOTES else ""
+
+
+def normalize_brackets_in_speech_text(text: str) -> str:
+    s = str(text or "")
+    # دعم الأقواس العربية ［...］ أو ［...］ وتحويلها إلى [...]
+    s = s.replace("［", "[").replace("］", "]")
+
+    def _repl(m: re.Match) -> str:
+        inner = m.group(1).strip().lower()
+        norm = normalize_emote_name(inner)
+        if norm:
+            return f" [{norm}] "
+        cleaned_inner = re.sub(r"[^a-zA-Z0-9\s]", "", inner).strip()
+        return f" [{cleaned_inner}] " if cleaned_inner else " "
+
+    s = re.sub(r"\[([^\[\]]+)\]", _repl, s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def format_tts_for_provider(text: str, provider: str) -> str:
+    normalized = normalize_brackets_in_speech_text(text)
+    if provider == "fish":
+        return normalized
+    if provider == "google":
+        return re.sub(r"\[([^\[\]]+)\]", r"<\1>", normalized)
+    # edge-tts أو غيره: إزالة الوسوم حتى لا تُقرأ ككلمات
+    no_tags = re.sub(r"\[([^\[\]]+)\]", "", normalized)
+    return re.sub(r"\s+", " ", no_tags).strip()
+
+
+def strip_emotes_for_caption(text: str) -> str:
+    s = str(text or "").replace("［", "[").replace("］", "]")
+    s = re.sub(r"\[[^\[\]]*\]", "", s)
+    s = re.sub(r"<[^<>]*>", "", s)
+    return re.sub(r"\s+", " ", s).strip()
 
 
 def fix_arabic_spelling(text: str) -> str:
@@ -133,13 +201,15 @@ def extract_json(text: str) -> dict:
 
 
 def polish_arabic_payload(payload: dict) -> dict:
-    title_in = fix_arabic_spelling(payload.get("title", ""))
-    desc_in = fix_arabic_spelling(payload.get("description", ""))
-    thumb_in = fix_arabic_spelling(payload.get("thumbnail_text", ""))
+    title_in = fix_arabic_spelling(strip_emotes_for_caption(payload.get("title", "")))
+    desc_in = fix_arabic_spelling(strip_emotes_for_caption(payload.get("description", "")))
+    thumb_in = fix_arabic_spelling(strip_emotes_for_caption(payload.get("thumbnail_text", "")))
     beats_in = payload.get("beats", [])
 
     for b in beats_in:
-        b["caption"] = fix_arabic_spelling(b.get("caption", ""))
+        raw_cap = str(b.get("caption", ""))
+        b["speech_text"] = normalize_brackets_in_speech_text(fix_arabic_spelling(raw_cap))
+        b["caption"] = fix_arabic_spelling(strip_emotes_for_caption(raw_cap))
 
     review_prompt = f"""
 راجع النصوص العربية التالية وصحح جميع الأخطاء الإملائية والنحوية وعلامات الترقيم دون تغيير المعنى أو عدد المقاطع ({len(beats_in)} مقطعاً).
@@ -159,25 +229,33 @@ def polish_arabic_payload(payload: dict) -> dict:
         try:
             rev = extract_json(raw_rev)
             if fix_arabic_spelling(rev.get("title", "")):
-                payload["title"] = fix_arabic_spelling(rev["title"])
+                payload["title"] = fix_arabic_spelling(strip_emotes_for_caption(rev["title"]))
             if fix_arabic_spelling(rev.get("description", "")):
-                payload["description"] = fix_arabic_spelling(rev["description"])
+                payload["description"] = fix_arabic_spelling(strip_emotes_for_caption(rev["description"]))
             if fix_arabic_spelling(rev.get("thumbnail_text", "")):
-                payload["thumbnail_text"] = fix_arabic_spelling(rev["thumbnail_text"])
+                payload["thumbnail_text"] = fix_arabic_spelling(strip_emotes_for_caption(rev["thumbnail_text"]))
             rev_caps = rev.get("captions", [])
             if isinstance(rev_caps, list) and len(rev_caps) == len(beats_in):
                 for idx, cap in enumerate(rev_caps):
-                    fixed_c = fix_arabic_spelling(cap)
+                    fixed_c = fix_arabic_spelling(strip_emotes_for_caption(cap))
                     if fixed_c:
                         beats_in[idx]["caption"] = fixed_c
+                        # دمج التصحيح الإملائي مع الاحتفاظ بالوسوم الصوتية إن وُجدت
+                        old_speech = beats_in[idx].get("speech_text", "")
+                        tags_found = re.findall(r"\[[^\[\]]+\]", old_speech)
+                        if tags_found:
+                            beats_in[idx]["speech_text"] = f"{fixed_c} {' '.join(tags_found)}".strip()
+                        else:
+                            beats_in[idx]["speech_text"] = fixed_c
         except Exception:
             pass
 
-    payload["title"] = fix_arabic_spelling(payload.get("title", ""))
-    payload["description"] = fix_arabic_spelling(payload.get("description", ""))
-    payload["thumbnail_text"] = fix_arabic_spelling(payload.get("thumbnail_text", ""))
+    payload["title"] = fix_arabic_spelling(strip_emotes_for_caption(payload.get("title", "")))
+    payload["description"] = fix_arabic_spelling(strip_emotes_for_caption(payload.get("description", "")))
+    payload["thumbnail_text"] = fix_arabic_spelling(strip_emotes_for_caption(payload.get("thumbnail_text", "")))
     for b in beats_in:
-        b["caption"] = fix_arabic_spelling(b.get("caption", ""))
+        b["caption"] = fix_arabic_spelling(strip_emotes_for_caption(b.get("caption", "")))
+        b["speech_text"] = normalize_brackets_in_speech_text(b.get("speech_text") or b["caption"])
 
     return payload
 
@@ -254,20 +332,20 @@ def build_unique_fallback(slot: int, history: list[dict]) -> dict:
     env_kind = "lighthouse"
     time_of_day = "night"
     beats = [
-        {"caption": "عند منتصف الليل اقترب المحقق من المنارة الساحلية القديمة والبحر يضرب الصخور.", "env": env_kind, "time": time_of_day, "mood": "neutral", "action": "walk", "prop": "none", "has_shadow": False},
-        {"caption": "كانت المنارة مطفأة منذ سنوات طويلة، لكن ضوءاً خافتاً ظهر في نافذتها العليا.", "env": env_kind, "time": time_of_day, "mood": "curious", "action": "point", "prop": "idea", "has_shadow": False},
-        {"caption": "دفع الباب الخشبي الثقيل فصدر صرير حاد تردد داخل البناء الفارغ.", "env": env_kind, "time": time_of_day, "mood": "surprised", "action": "alert", "prop": "exclamation", "has_shadow": False},
-        {"caption": "أشعل مصباحه اليدوي وبدأ يصعد الدرج الحجري الملتف خطوة بعد خطوة.", "env": env_kind, "time": time_of_day, "mood": "curious", "action": "walk", "prop": "none", "has_shadow": False},
-        {"caption": "على الجدار الحجري الرطب وجد آثار أقدام حديثة تتجه نحو الأعلى.", "env": env_kind, "time": time_of_day, "mood": "surprised", "action": "point", "prop": "idea", "has_shadow": False},
-        {"caption": "توقف فجأة عندما شعر بأن أحداً يقف خلفه في الظلام.", "env": env_kind, "time": time_of_day, "mood": "shocked", "action": "alert", "prop": "exclamation", "has_shadow": True},
-        {"caption": "استدار بسرعة فلم يجد أحداً، لكن خيالاً غريباً انعكس على الجدار.", "env": env_kind, "time": time_of_day, "mood": "shocked", "action": "alert", "prop": "exclamation", "has_shadow": True},
-        {"caption": "اقترب الخيال ببطء ثم أشار نحو صندوق معدني قديم في الزاوية.", "env": env_kind, "time": time_of_day, "mood": "surprised", "action": "point", "prop": "none", "has_shadow": True},
-        {"caption": "فتح المحقق الصندوق فوجد دفتراً قديماً يحمل تاريخ آخر ليلة عملت فيها المنارة.", "env": env_kind, "time": time_of_day, "mood": "curious", "action": "point", "prop": "speech", "has_shadow": False},
-        {"caption": "كانت الصفحات الأخيرة تحذر من أن الضوء لا ينطفئ بل يختبئ.", "env": env_kind, "time": time_of_day, "mood": "shocked", "action": "alert", "prop": "exclamation", "has_shadow": False},
-        {"caption": "وفجأة انطفأ المصباح اليدوي في يده وأصبح المكان غارقاً في العتمة.", "env": env_kind, "time": time_of_day, "mood": "shocked", "action": "alert", "prop": "exclamation", "has_shadow": True},
-        {"caption": "سمع صوت همس خافت يطلب منه ألا ينظر نحو البحر.", "env": env_kind, "time": time_of_day, "mood": "shocked", "action": "alert", "prop": "speech", "has_shadow": True},
-        {"caption": "رفع رأسه نحو النافذة ليرى سفينة قديمة تتحرك بلا أضواء وسط الضباب.", "env": env_kind, "time": "fog", "mood": "shocked", "action": "point", "prop": "exclamation", "has_shadow": False},
-        {"caption": "وعندما عاد لينظر إلى الدفتر كانت الصفحة الأخيرة قد اختفت تماماً.", "env": env_kind, "time": "night", "mood": "surprised", "action": "alert", "prop": "none", "has_shadow": True},
+        {"caption": "عند منتصف الليل اقترب المحقق من المنارة الساحلية القديمة والبحر يضرب الصخور.", "speech_text": "عند منتصف الليل اقترب المحقق من المنارة الساحلية القديمة والبحر يضرب الصخور.", "env": env_kind, "time": time_of_day, "mood": "neutral", "action": "walk", "prop": "none", "has_shadow": False},
+        {"caption": "كانت المنارة مطفأة منذ سنوات طويلة، لكن ضوءاً خافتاً ظهر في نافذتها العليا.", "speech_text": "كانت المنارة مطفأة منذ سنوات طويلة، لكن ضوءاً خافتاً ظهر في نافذتها العليا. [whispering]", "env": env_kind, "time": time_of_day, "mood": "curious", "action": "point", "prop": "idea", "has_shadow": False},
+        {"caption": "دفع الباب الخشبي الثقيل فصدر صرير حاد تردد داخل البناء الفارغ.", "speech_text": "دفع الباب الخشبي الثقيل فصدر صرير حاد تردد داخل البناء الفارغ. [surprised]", "env": env_kind, "time": time_of_day, "mood": "surprised", "action": "alert", "prop": "exclamation", "has_shadow": False},
+        {"caption": "أشعل مصباحه اليدوي وبدأ يصعد الدرج الحجري الملتف خطوة بعد خطوة.", "speech_text": "أشعل مصباحه اليدوي وبدأ يصعد الدرج الحجري الملتف خطوة بعد خطوة.", "env": env_kind, "time": time_of_day, "mood": "curious", "action": "walk", "prop": "none", "has_shadow": False},
+        {"caption": "على الجدار الحجري الرطب وجد آثار أقدام حديثة تتجه نحو الأعلى.", "speech_text": "على الجدار الحجري الرطب وجد آثار أقدام حديثة تتجه نحو الأعلى.", "env": env_kind, "time": time_of_day, "mood": "surprised", "action": "point", "prop": "idea", "has_shadow": False},
+        {"caption": "توقف فجأة عندما شعر بأن أحداً يقف خلفه في الظلام.", "speech_text": "توقف فجأة عندما شعر بأن أحداً يقف خلفه في الظلام. [gasping]", "env": env_kind, "time": time_of_day, "mood": "shocked", "action": "alert", "prop": "exclamation", "has_shadow": True},
+        {"caption": "استدار بسرعة فلم يجد أحداً، لكن ضحكة خافتة ترددت في المكان.", "speech_text": "استدار بسرعة فلم يجد أحداً، لكن ضحكة خافتة ترددت في المكان. [laughing]", "env": env_kind, "time": time_of_day, "mood": "shocked", "action": "alert", "prop": "exclamation", "has_shadow": True},
+        {"caption": "اقترب الخيال ببطء ثم أشار نحو صندوق معدني قديم في الزاوية.", "speech_text": "اقترب الخيال ببطء ثم أشار نحو صندوق معدني قديم في الزاوية.", "env": env_kind, "time": time_of_day, "mood": "surprised", "action": "point", "prop": "none", "has_shadow": True},
+        {"caption": "فتح المحقق الصندوق فوجد دفتراً قديماً يحمل تاريخ آخر ليلة عملت فيها المنارة.", "speech_text": "فتح المحقق الصندوق فوجد دفتراً قديماً يحمل تاريخ آخر ليلة عملت فيها المنارة.", "env": env_kind, "time": time_of_day, "mood": "curious", "action": "point", "prop": "speech", "has_shadow": False},
+        {"caption": "كانت الصفحات الأخيرة تحذر من أن الضوء لا ينطفئ بل يختبئ.", "speech_text": "كانت الصفحات الأخيرة تحذر من أن الضوء لا ينطفئ بل يختبئ. [sighing]", "env": env_kind, "time": time_of_day, "mood": "shocked", "action": "alert", "prop": "exclamation", "has_shadow": False},
+        {"caption": "وفجأة انطفأ المصباح اليدوي في يده وأصبح المكان غارقاً في العتمة.", "speech_text": "وفجأة انطفأ المصباح اليدوي في يده وأصبح المكان غارقاً في العتمة. [surprised]", "env": env_kind, "time": time_of_day, "mood": "shocked", "action": "alert", "prop": "exclamation", "has_shadow": True},
+        {"caption": "سمع صوت همس خافت يطلب منه ألا ينظر نحو البحر.", "speech_text": "سمع صوت همس خافت يطلب منه ألا ينظر نحو البحر. [whispering]", "env": env_kind, "time": time_of_day, "mood": "shocked", "action": "alert", "prop": "speech", "has_shadow": True},
+        {"caption": "رفع رأسه نحو النافذة ليرى سفينة قديمة تتحرك بلا أضواء وسط الضباب.", "speech_text": "رفع رأسه نحو النافذة ليرى سفينة قديمة تتحرك بلا أضواء وسط الضباب.", "env": env_kind, "time": "fog", "mood": "shocked", "action": "point", "prop": "exclamation", "has_shadow": False},
+        {"caption": "وعندما عاد لينظر إلى الدفتر كانت الصفحة الأخيرة قد اختفت تماماً.", "speech_text": "وعندما عاد لينظر إلى الدفتر كانت الصفحة الأخيرة قد اختفت تماماً. [sighing]", "env": env_kind, "time": "night", "mood": "surprised", "action": "alert", "prop": "none", "has_shadow": True},
     ]
     return {
         "title": f"ملف سري #{idx} [{run_id}]: سر {place_ar}",
@@ -292,6 +370,7 @@ def generate_unique_story_payload(slot: int, history: list[dict]) -> dict:
 
 المدة المطلوبة عند القراءة الصوتية: من 45 إلى 60 ثانية (14 إلى 15 مقطعاً متسلسلاً).
 ممنوع منعاً باتاً عمل قفزات غير منطقية أو جمل منفصلة؛ يجب أن تكون كل جملة استمراراً مباشراً وطبيعياً للجملة التي قبلها في نفس القصة والمكان.
+يمكنك تضمين وسوم تعبير صوتي إنجليزية دقيقة داخل "speech_text" في بعض المقاطع المناسبة مثل: [laughing], [whispering], [sighing], [surprised], [gasping], [nervous], [excited] (بحروف صحيحة بدون أخطاء إملائية)، بينما يبقى "caption" نصاً عربياً صافياً بدون وسوم.
 ممنوع تكرار هذه العناوين أو الأفكار السابقة:
 {avoid_block}
 
@@ -305,6 +384,7 @@ def generate_unique_story_payload(slot: int, history: list[dict]) -> dict:
   "beats": [
     {{
       "caption": "جملة مترابطة واضحة بإملاء صحيح من 8 إلى 13 كلمة",
+      "speech_text": "نفس الجملة مع وسم صوتي مناسب مثل [whispering] أو [laughing] عند الحاجة",
       "env": "lighthouse",
       "time": "night",
       "mood": "neutral",
@@ -357,27 +437,27 @@ def draw_dynamic_scene(draw: ImageDraw.ImageDraw, env: str, time_of_day: str, fr
     rng = random.Random(seed_offset + (frame_idx // 6))
 
     if time_of_day == "day":
-        sky_top, sky_bot, ground_c = (112, 190, 245), (168, 222, 252), (82, 162, 74)
+        sky_top, sky_bot, ground_c = (104, 184, 244), (168, 222, 252), (78, 158, 72)
     elif time_of_day == "dusk":
-        sky_top, sky_bot, ground_c = (66, 36, 86), (198, 92, 78), (56, 48, 74)
+        sky_top, sky_bot, ground_c = (58, 30, 82), (204, 88, 72), (50, 42, 68)
     elif time_of_day == "fog":
-        sky_top, sky_bot, ground_c = (78, 92, 104), (126, 140, 148), (58, 72, 74)
+        sky_top, sky_bot, ground_c = (72, 86, 98), (124, 138, 146), (54, 68, 72)
     else:
-        sky_top, sky_bot, ground_c = (20 + (seed_offset % 14), 22, 50 + (seed_offset % 18)), (34, 30, 66), (66, 64, 86)
+        sky_top, sky_bot, ground_c = (18 + (seed_offset % 14), 20, 48 + (seed_offset % 18)), (32, 28, 64), (62, 60, 82)
 
     px_rect(draw, 0, 0, GRID_W - 1, 28, sky_top)
     px_rect(draw, 0, 29, GRID_W - 1, 36, sky_bot)
 
     if time_of_day in ("night", "dusk"):
         mx = 8 + (seed_offset % 46)
-        px_rect(draw, mx, 6, mx + 6, 12, (245, 238, 185))
-        for _ in range(8):
+        px_rect(draw, mx, 6, mx + 6, 12, (248, 240, 188))
+        for _ in range(10):
             sx, sy = rng.randint(2, GRID_W - 3), rng.randint(2, 22)
-            px_rect(draw, sx, sy, sx, sy, (240, 242, 255))
+            px_rect(draw, sx, sy, sx, sy, (240, 244, 255))
 
     if env == "lighthouse":
-        px_rect(draw, 0, 76, GRID_W - 1, GRID_H - 1, (34, 78, 122))
-        px_rect(draw, 46, 18, 58, 78, (226, 228, 238), outline=(20, 22, 32))
+        px_rect(draw, 0, 76, GRID_W - 1, GRID_H - 1, (30, 72, 116))
+        px_rect(draw, 46, 18, 58, 78, (226, 228, 238), outline=(18, 20, 30))
         for ry in range(24, 74, 12):
             px_rect(draw, 46, ry, 58, ry + 5, (196, 58, 58))
         px_rect(draw, 48, 12, 56, 18, (255, 232, 120))
@@ -387,29 +467,29 @@ def draw_dynamic_scene(draw: ImageDraw.ImageDraw, env: str, time_of_day: str, fr
             px_rect(draw, tx, 38, tx + 4, 75, (74, 46, 30), outline=(18, 14, 12))
             px_rect(draw, tx - 4, 22, tx + 8, 42, (36, 96, 58), outline=(16, 28, 20))
     elif env == "tunnel":
-        px_rect(draw, 0, 0, GRID_W - 1, 86, (44, 48, 64))
-        px_rect(draw, 22, 24, 50, 86, (24, 26, 36), outline=(92, 98, 118))
-        px_rect(draw, 0, 87, GRID_W - 1, GRID_H - 1, (68, 70, 82))
+        px_rect(draw, 0, 0, GRID_W - 1, 86, (42, 46, 62))
+        px_rect(draw, 22, 24, 50, 86, (22, 24, 34), outline=(96, 102, 124))
+        px_rect(draw, 0, 87, GRID_W - 1, GRID_H - 1, (64, 66, 78))
     elif env == "library":
-        px_rect(draw, 0, 0, GRID_W - 1, 86, (88, 56, 36))
+        px_rect(draw, 0, 0, GRID_W - 1, 86, (84, 52, 34))
         for sx in range(4, GRID_W - 8, 18):
-            px_rect(draw, sx, 22, sx + 14, 76, (62, 38, 24), outline=(22, 16, 12))
+            px_rect(draw, sx, 22, sx + 14, 76, (58, 36, 22), outline=(22, 16, 12))
             for by in range(26, 72, 10):
                 px_rect(draw, sx + 2, by, sx + 12, by + 5, (168, 68, 58))
-        px_rect(draw, 0, 87, GRID_W - 1, GRID_H - 1, (112, 74, 46))
+        px_rect(draw, 0, 87, GRID_W - 1, GRID_H - 1, (108, 70, 44))
     elif env == "ship":
-        px_rect(draw, 0, 78, GRID_W - 1, GRID_H - 1, (28, 66, 98))
+        px_rect(draw, 0, 78, GRID_W - 1, GRID_H - 1, (26, 62, 94))
         px_rect(draw, 8, 54, 62, 80, (92, 54, 34), outline=(18, 14, 12))
         px_rect(draw, 32, 18, 36, 54, (64, 40, 26))
     elif env == "basement":
-        px_rect(draw, 0, 0, GRID_W - 1, 86, (58, 56, 68))
-        px_rect(draw, 30, 34, 42, 62, (32, 30, 38), outline=(16, 16, 20))
-        px_rect(draw, 0, 87, GRID_W - 1, GRID_H - 1, (76, 74, 86))
+        px_rect(draw, 0, 0, GRID_W - 1, 86, (54, 52, 64))
+        px_rect(draw, 30, 34, 42, 62, (28, 26, 34), outline=(16, 16, 20))
+        px_rect(draw, 0, 87, GRID_W - 1, GRID_H - 1, (72, 70, 82))
     else:
-        px_rect(draw, 0, 36, GRID_W - 1, 86, (132, 68, 64))
+        px_rect(draw, 0, 36, GRID_W - 1, 86, (128, 64, 60))
         for bx in range(4, GRID_W - 10, 16):
             bh = 18 + ((bx + seed_offset) % 10)
-            px_rect(draw, bx, 37 - bh, bx + 12, 36, (34, 38, 58), outline=(16, 18, 28))
+            px_rect(draw, bx, 37 - bh, bx + 12, 36, (32, 36, 56), outline=(16, 18, 28))
         px_rect(draw, 0, 87, GRID_W - 1, GRID_H - 1, ground_c)
 
     if time_of_day == "fog":
@@ -507,6 +587,55 @@ def draw_prop(draw: ImageDraw.ImageDraw, cx: int, cy: int, prop: str, frame_idx:
         px_rect(draw, cx, py + 7, cx + 1, py + 7, (238, 64, 98))
 
 
+def apply_after_effects_polish(img: Image.Image, char_x: int, char_y: int, mood: str, frame_idx: int, num_frames: int, story_seed: int) -> Image.Image:
+    glow_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    gdraw = ImageDraw.Draw(glow_layer)
+    gx = char_x * PX + PX // 2
+    gy = (char_y - 10) * PX
+    pulse = int(math.sin((frame_idx / max(num_frames, 1)) * math.pi * 2) * 25)
+    glow_color = (255, 210, 120, max(25, 55 + pulse)) if mood in ("shocked", "surprised") else (130, 185, 255, max(20, 42 + pulse))
+    gdraw.ellipse([gx - 220, gy - 220, gx + 220, gy + 220], fill=glow_color)
+    glow_layer = glow_layer.filter(ImageFilter.GaussianBlur(radius=65))
+
+    part_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    pdraw = ImageDraw.Draw(part_layer)
+    rng = random.Random(story_seed + 999)
+    for i in range(18):
+        bx = rng.randint(60, W - 60)
+        by = rng.randint(180, 1320)
+        dx = int(math.sin(frame_idx * 0.12 + i) * 28)
+        dy = int(math.cos(frame_idx * 0.09 + i) * 22)
+        alpha = 45 + ((i * 7 + frame_idx * 5) % 55)
+        pdraw.ellipse([bx + dx, by + dy, bx + dx + 8, by + dy + 8], fill=(245, 240, 220, alpha))
+    part_layer = part_layer.filter(ImageFilter.GaussianBlur(radius=2))
+
+    vig_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    vdraw = ImageDraw.Draw(vig_layer)
+    vdraw.rectangle([0, 0, W, 140], fill=(8, 10, 18, 110))
+    vdraw.rectangle([0, H - 180, W, H], fill=(8, 10, 18, 125))
+    vdraw.rectangle([0, 0, 55, H], fill=(8, 10, 18, 75))
+    vdraw.rectangle([W - 55, 0, W, H], fill=(8, 10, 18, 75))
+    vig_layer = vig_layer.filter(ImageFilter.GaussianBlur(radius=28))
+
+    composed = Image.alpha_composite(img.convert("RGBA"), glow_layer)
+    composed = Image.alpha_composite(composed, part_layer)
+    composed = Image.alpha_composite(composed, vig_layer)
+
+    progress = frame_idx / max(num_frames - 1, 1)
+    ease = 0.5 - 0.5 * math.cos(progress * math.pi)
+    zoom_factor = 1.0 + 0.045 * ease
+    crop_w = int(W / zoom_factor)
+    crop_h = int(H / zoom_factor)
+
+    shake_x = int(math.sin(frame_idx * 1.9) * 8) if mood == "shocked" else 0
+    shake_y = int(math.cos(frame_idx * 2.3) * 6) if mood == "shocked" else 0
+
+    left = max(0, min(W - crop_w, (W - crop_w) // 2 + shake_x))
+    top = max(0, min(H - crop_h, (H - crop_h) // 2 + shake_y))
+    cropped = composed.crop((left, top, left + crop_w, top + crop_h))
+    return cropped.resize((W, H), Image.Resampling.LANCZOS).convert("RGB")
+
+
 def load_arabic_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     candidates = [
         "/usr/share/fonts/truetype/noto/NotoSansArabic-Bold.ttf",
@@ -548,7 +677,7 @@ def render_beat_frames(beat: dict, beat_idx: int, duration_sec: float, story_see
     action = str(beat.get("action", "walk")).strip()
     prop = str(beat.get("prop", "none")).strip()
     has_shadow = bool(beat.get("has_shadow", True))
-    caption_raw = fix_arabic_spelling(beat.get("caption", ""))
+    caption_raw = fix_arabic_spelling(strip_emotes_for_caption(beat.get("caption", "")))
 
     shirt_palette = [
         (102, 112, 212),
@@ -596,6 +725,9 @@ def render_beat_frames(beat: dict, beat_idx: int, duration_sec: float, story_see
         if prop != "none":
             draw_prop(draw, char_x, char_y, prop, f_i)
 
+        img = apply_after_effects_polish(img, char_x, char_y, mood, f_i, num_frames, story_seed + beat_idx * 13)
+        draw = ImageDraw.Draw(img)
+
         if caption_raw:
             lines = wrap_caption_lines(draw, caption_raw, font_cap, W - 140)
             line_boxes = [draw.textbbox((0, 0), ln, font=font_cap) for ln in lines]
@@ -609,11 +741,13 @@ def render_beat_frames(beat: dict, beat_idx: int, duration_sec: float, story_see
             bx1 = bx0 + box_w
             by1 = by0 + box_h
 
+            draw.rounded_rectangle([bx0 + 6, by0 + 8, bx1 + 6, by1 + 8], radius=22, fill=(5, 6, 12))
             draw.rounded_rectangle([bx0, by0, bx1, by1], radius=22, fill=(14, 16, 26), outline=(120, 210, 175), width=3)
             cur_y = by0 + 16
             for ln, b in zip(lines, line_boxes):
                 lw = b[2] - b[0]
                 lx = (W - lw) // 2
+                draw.text((lx + 3, cur_y + 3), ln, font=font_cap, fill=(8, 10, 18))
                 draw.text((lx, cur_y), ln, font=font_cap, fill=(255, 255, 255))
                 cur_y += line_h + 10
 
@@ -651,7 +785,7 @@ def get_fish_api_keys() -> list[str]:
     return keys
 
 
-def try_fish_audio_tts(full_script: str, audio_path: Path) -> bool:
+def try_fish_audio_tts(fish_script: str, audio_path: Path) -> bool:
     for idx, api_key in enumerate(get_fish_api_keys(), start=1):
         try:
             resp = requests.post(
@@ -661,12 +795,12 @@ def try_fish_audio_tts(full_script: str, audio_path: Path) -> bool:
                     "Content-Type": "application/json",
                     "model": "s2.1-pro-free",
                 },
-                json={"text": full_script, "format": "mp3"},
+                json={"text": fish_script, "format": "mp3"},
                 timeout=90,
             )
             if resp.ok and resp.content and len(resp.content) > 1024:
                 audio_path.write_bytes(resp.content)
-                print(f"TTS succeeded using Fish Audio key #{idx}.")
+                print(f"TTS succeeded using Fish Audio key #{idx} with emotes.")
                 return True
             print(f"Fish Audio key #{idx} returned status {resp.status_code}; trying next...")
         except Exception as e:
@@ -674,93 +808,109 @@ def try_fish_audio_tts(full_script: str, audio_path: Path) -> bool:
     return False
 
 
-def try_google_ai_studio_tts(full_script: str, audio_path: Path) -> bool:
+def try_google_ai_studio_tts(google_script: str, audio_path: Path) -> bool:
     google_key = os.getenv("GOOGLE_API_KEY", "").strip()
     if not google_key:
         return False
-    try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key={google_key}"
-        payload = {
-            "contents": [{"parts": [{"text": f"اقرأ هذه القصة بوضوح وتشويق باللغة العربية:\n\n{full_script}"}]}],
-            "generationConfig": {
-                "responseModalities": ["AUDIO"],
-                "speechConfig": {
-                    "voiceConfig": {
-                        "prebuiltVoiceConfig": {
-                            "voiceName": "Puck"
-                        }
-                    }
-                },
-            },
-        }
-        r = requests.post(url, json=payload, timeout=90)
-        if r.ok:
-            parts = (
-                r.json()
-                .get("candidates", [{}])[0]
-                .get("content", {})
-                .get("parts", [])
+    models_to_try = [
+        "gemini-3.8-flash-tts",
+        "gemini-2.5-flash-preview-tts",
+    ]
+    for model_name in models_to_try:
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={google_key}"
+            prompt_text = (
+                f"اقرأ النص التالي باللغة العربية مع التزام التعبيرات الصوتية داخل الأقواس الزاوية مثل <laughing> و<whispering> و<sighing>:\n\n{google_script}"
+                if "3.8" in model_name
+                else f"اقرأ هذه القصة بوضوح وتشويق باللغة العربية:\n\n{strip_emotes_for_caption(google_script)}"
             )
-            for p in parts:
-                inline = p.get("inlineData") or p.get("inline_data")
-                if inline and inline.get("data"):
-                    raw_audio = base64.b64decode(inline["data"])
-                    tmp_audio = OUT_DIR / "google_tts_raw.bin"
-                    tmp_audio.write_bytes(raw_audio)
-                    mime = str(inline.get("mimeType") or inline.get("mime_type") or "")
-                    if "pcm" in mime.lower() or "l16" in mime.lower():
-                        subprocess.run(
-                            [
-                                "ffmpeg",
-                                "-y",
-                                "-f",
-                                "s16le",
-                                "-ar",
-                                "24000",
-                                "-ac",
-                                "1",
-                                "-i",
-                                str(tmp_audio),
-                                "-c:a",
-                                "libmp3lame",
-                                "-b:a",
-                                "192k",
-                                str(audio_path),
-                            ],
-                            check=True,
-                        )
-                    else:
-                        subprocess.run(
-                            [
-                                "ffmpeg",
-                                "-y",
-                                "-i",
-                                str(tmp_audio),
-                                "-c:a",
-                                "libmp3lame",
-                                "-b:a",
-                                "192k",
-                                str(audio_path),
-                            ],
-                            check=True,
-                        )
-                    if audio_path.exists() and audio_path.stat().st_size > 1024:
-                        print("TTS succeeded using Google AI Studio fallback.")
-                        return True
-        print("Google AI Studio TTS fallback did not return valid audio.")
-    except Exception as e:
-        print("Google AI Studio TTS error:", e)
+            payload = {
+                "contents": [{"parts": [{"text": prompt_text}]}],
+                "generationConfig": {
+                    "responseModalities": ["AUDIO"],
+                    "speechConfig": {
+                        "voiceConfig": {
+                            "prebuiltVoiceConfig": {
+                                "voiceName": "Puck"
+                            }
+                        }
+                    },
+                },
+            }
+            r = requests.post(url, json=payload, timeout=90)
+            if r.ok:
+                parts = (
+                    r.json()
+                    .get("candidates", [{}])[0]
+                    .get("content", {})
+                    .get("parts", [])
+                )
+                for p in parts:
+                    inline = p.get("inlineData") or p.get("inline_data")
+                    if inline and inline.get("data"):
+                        raw_audio = base64.b64decode(inline["data"])
+                        tmp_audio = OUT_DIR / "google_tts_raw.bin"
+                        tmp_audio.write_bytes(raw_audio)
+                        mime = str(inline.get("mimeType") or inline.get("mime_type") or "")
+                        if "pcm" in mime.lower() or "l16" in mime.lower():
+                            subprocess.run(
+                                [
+                                    "ffmpeg",
+                                    "-y",
+                                    "-f",
+                                    "s16le",
+                                    "-ar",
+                                    "24000",
+                                    "-ac",
+                                    "1",
+                                    "-i",
+                                    str(tmp_audio),
+                                    "-c:a",
+                                    "libmp3lame",
+                                    "-b:a",
+                                    "192k",
+                                    str(audio_path),
+                                ],
+                                check=True,
+                            )
+                        else:
+                            subprocess.run(
+                                [
+                                    "ffmpeg",
+                                    "-y",
+                                    "-i",
+                                    str(tmp_audio),
+                                    "-c:a",
+                                    "libmp3lame",
+                                    "-b:a",
+                                    "192k",
+                                    str(audio_path),
+                                ],
+                                check=True,
+                            )
+                        if audio_path.exists() and audio_path.stat().st_size > 1024:
+                            print(f"TTS succeeded using Google AI Studio ({model_name}).")
+                            return True
+        except Exception as e:
+            print(f"Google AI Studio TTS ({model_name}) error:", e)
     return False
 
 
 async def generate_continuous_voice(beats: list[dict], audio_path: Path) -> list[float]:
-    lines = [fix_arabic_spelling(b.get("caption", "")) or "ملفات سرية" for b in beats]
-    full_script = " ".join(lines)
+    raw_lines = [
+        normalize_brackets_in_speech_text(fix_arabic_spelling(b.get("speech_text") or b.get("caption", ""))) or "ملفات سرية"
+        for b in beats
+    ]
+    clean_lines = [strip_emotes_for_caption(line) or "ملفات سرية" for line in raw_lines]
 
-    if not try_fish_audio_tts(full_script, audio_path):
-        if not try_google_ai_studio_tts(full_script, audio_path):
+    fish_script = " ".join(format_tts_for_provider(line, "fish") for line in raw_lines)
+    google_script = " ".join(format_tts_for_provider(line, "google") for line in raw_lines)
+    edge_script = " ".join(format_tts_for_provider(line, "edge") for line in raw_lines)
+
+    if not try_fish_audio_tts(fish_script, audio_path):
+        if not try_google_ai_studio_tts(google_script, audio_path):
             voice = "ar-SA-HamedNeural"
-            comm = edge_tts.Communicate(text=full_script, voice=voice, rate="+2%")
+            comm = edge_tts.Communicate(text=edge_script, voice=voice, rate="+2%")
             with open(audio_path, "wb") as f:
                 async for chunk in comm.stream():
                     if chunk["type"] == "audio":
@@ -768,8 +918,8 @@ async def generate_continuous_voice(beats: list[dict], audio_path: Path) -> list
             print("TTS succeeded using Edge-TTS fallback.")
 
     total_dur = get_audio_duration(audio_path)
-    weights = [max(len(re.findall(r"\S+", line)), 1) for line in lines]
-    weight_sum = sum(weights) or len(lines)
+    weights = [max(len(re.findall(r"\S+", line)), 1) for line in clean_lines]
+    weight_sum = sum(weights) or len(clean_lines)
     return [max((w / weight_sum) * total_dur, 1.5) for w in weights]
 
 
@@ -777,7 +927,7 @@ def create_thumbnail(first_frame: Path, thumb_text: str, out_thumb: Path) -> Non
     im = Image.open(first_frame).convert("RGB").resize((W, H), Image.Resampling.NEAREST)
     draw = ImageDraw.Draw(im)
     draw.rectangle([0, 1540, W, H], fill=(12, 14, 24))
-    clean_t = fix_arabic_spelling(thumb_text) or "ملف سري"
+    clean_t = fix_arabic_spelling(strip_emotes_for_caption(thumb_text)) or "ملف سري"
     font_t = load_arabic_font(72)
     bbox = draw.textbbox((0, 0), clean_t, font=font_t)
     tw = bbox[2] - bbox[0]
@@ -815,7 +965,7 @@ def render_video_from_beats(beats: list[dict], beat_durations: list[float], audi
             "-i",
             str(audio_path),
             "-vf",
-            "scale=1080:1920:flags=neighbor,format=yuv420p",
+            "scale=1080:1920:flags=neighbor,eq=contrast=1.06:saturation=1.12,format=yuv420p",
             "-r",
             "24",
             "-c:v",
