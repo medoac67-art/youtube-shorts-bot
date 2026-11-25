@@ -103,9 +103,7 @@ def normalize_emote_name(raw_tag: str) -> str:
 
 
 def normalize_brackets_in_speech_text(text: str) -> str:
-    s = str(text or "")
-    # دعم الأقواس العربية ［...］ أو ［...］ وتحويلها إلى [...]
-    s = s.replace("［", "[").replace("］", "]")
+    s = str(text or "").replace("［", "[").replace("］", "]")
 
     def _repl(m: re.Match) -> str:
         inner = m.group(1).strip().lower()
@@ -125,7 +123,6 @@ def format_tts_for_provider(text: str, provider: str) -> str:
         return normalized
     if provider == "google":
         return re.sub(r"\[([^\[\]]+)\]", r"<\1>", normalized)
-    # edge-tts أو غيره: إزالة الوسوم حتى لا تُقرأ ككلمات
     no_tags = re.sub(r"\[([^\[\]]+)\]", "", normalized)
     return re.sub(r"\s+", " ", no_tags).strip()
 
@@ -240,7 +237,6 @@ def polish_arabic_payload(payload: dict) -> dict:
                     fixed_c = fix_arabic_spelling(strip_emotes_for_caption(cap))
                     if fixed_c:
                         beats_in[idx]["caption"] = fixed_c
-                        # دمج التصحيح الإملائي مع الاحتفاظ بالوسوم الصوتية إن وُجدت
                         old_speech = beats_in[idx].get("speech_text", "")
                         tags_found = re.findall(r"\[[^\[\]]+\]", old_speech)
                         if tags_found:
@@ -303,13 +299,11 @@ def is_duplicate_story(candidate: dict, history: list[dict]) -> bool:
 
 def get_slot_number() -> int:
     now_hour = datetime.now(timezone.utc).hour
-    if now_hour < 10:
+    if now_hour < 12:
         return 1
-    if now_hour < 14:
-        return 2
     if now_hour < 18:
-        return 3
-    return 4
+        return 2
+    return 3
 
 
 def call_llm_for_story(prompt: str) -> dict | None:
@@ -999,54 +993,63 @@ def upload_to_youtube(
         print("YouTube secrets not found; skipping upload.")
         return None
 
-    creds = Credentials(
-        token=None,
-        refresh_token=refresh_token,
-        token_uri="https://oauth2.googleapis.com/token",
-        client_id=client_id,
-        client_secret=client_secret,
-        scopes=[
-            "https://www.googleapis.com/auth/youtube.upload",
-            "https://www.googleapis.com/auth/youtube.force-ssl",
-        ],
-    )
-    creds.refresh(Request())
+    try:
+        creds = Credentials(
+            token=None,
+            refresh_token=refresh_token,
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=client_id,
+            client_secret=client_secret,
+            scopes=[
+                "https://www.googleapis.com/auth/youtube.upload",
+                "https://www.googleapis.com/auth/youtube.force-ssl",
+            ],
+        )
+        creds.refresh(Request())
 
-    youtube = build("youtube", "v3", credentials=creds)
+        youtube = build("youtube", "v3", credentials=creds)
 
-    clean_tags = [fix_arabic_spelling(k).lstrip("#")[:30] for k in keywords if fix_arabic_spelling(k)][:15]
-    body = {
-        "snippet": {
-            "title": fix_arabic_spelling(title)[:95],
-            "description": description[:4900],
-            "tags": clean_tags,
-            "categoryId": "24",
-        },
-        "status": {
-            "privacyStatus": privacy_status,
-            "selfDeclaredMadeForKids": False,
-        },
-    }
+        clean_tags = [fix_arabic_spelling(k).lstrip("#")[:30] for k in keywords if fix_arabic_spelling(k)][:15]
+        body = {
+            "snippet": {
+                "title": fix_arabic_spelling(title)[:95],
+                "description": description[:4900],
+                "tags": clean_tags,
+                "categoryId": "24",
+            },
+            "status": {
+                "privacyStatus": privacy_status,
+                "selfDeclaredMadeForKids": False,
+            },
+        }
 
-    media = MediaFileUpload(str(video_path), mimetype="video/mp4", resumable=True)
-    request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
+        media = MediaFileUpload(str(video_path), mimetype="video/mp4", resumable=True)
+        request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
 
-    response = None
-    while response is None:
-        _, response = request.next_chunk()
+        response = None
+        while response is None:
+            _, response = request.next_chunk()
 
-    video_id = response.get("id")
-    if video_id and thumb_path.exists():
-        try:
-            youtube.thumbnails().set(
-                videoId=video_id,
-                media_body=MediaFileUpload(str(thumb_path), mimetype="image/png"),
-            ).execute()
-        except Exception as e:
-            print("Thumbnail upload note:", e)
+        video_id = response.get("id")
+        if video_id and thumb_path.exists():
+            try:
+                youtube.thumbnails().set(
+                    videoId=video_id,
+                    media_body=MediaFileUpload(str(thumb_path), mimetype="image/png"),
+                ).execute()
+            except Exception as e:
+                print("Thumbnail upload note:", e)
 
-    print("Uploaded to YouTube! Video ID:", video_id, "Privacy:", privacy_status)
-    return video_id
+        print("Uploaded to YouTube! Video ID:", video_id, "Privacy:", privacy_status)
+        return video_id
+
+    except Exception as e:
+        err_msg = str(e)
+        if "uploadLimitExceeded" in err_msg or "exceeded the number of videos they may upload" in err_msg:
+            print("YouTube daily upload limit reached (uploadLimitExceeded). Video is saved locally at:", video_path)
+            return None
+        print("YouTube upload failed with error:", err_msg)
+        return None
 
 
 def main() -> None:
@@ -1076,7 +1079,7 @@ def main() -> None:
     if first_frame.exists():
         create_thumbnail(first_frame, str(payload.get("thumbnail_text", "ملفات سرية")), thumb_path)
 
-    upload_to_youtube(
+    video_id = upload_to_youtube(
         video_path=video_path,
         thumb_path=thumb_path,
         title=str(meta["title"]),
@@ -1091,6 +1094,7 @@ def main() -> None:
             "title": meta["title"],
             "summary_text": " ".join(fix_arabic_spelling(b.get("caption", "")) for b in beats),
             "fingerprint": story_fingerprint(payload),
+            "youtube_video_id": video_id,
         }
     )
     save_history(history)
