@@ -63,7 +63,7 @@ def is_duplicate_story(candidate: dict, history: list[dict]) -> bool:
     cand_text = " ".join(clean_ar_text(b.get("caption", "")) for b in candidate.get("beats", []))
     cand_fp = story_fingerprint(candidate)
 
-    if not cand_title or len(cand_text) < 25:
+    if not cand_title or len(cand_text) < 80:
         return True
 
     for item in history:
@@ -109,12 +109,12 @@ def call_llm_for_story(prompt: str) -> dict | None:
             r = requests.post(
                 url,
                 headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                json={"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 1.05},
-                timeout=50,
+                json={"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 1.0},
+                timeout=60,
             )
             if r.ok:
                 data = extract_json(r.json()["choices"][0]["message"]["content"])
-                if isinstance(data.get("beats"), list) and len(data["beats"]) >= 6:
+                if isinstance(data.get("beats"), list) and len(data["beats"]) >= 12:
                     return data
         except Exception:
             pass
@@ -126,11 +126,11 @@ def call_llm_for_story(prompt: str) -> dict | None:
                 f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={google_key}",
                 headers={"Content-Type": "application/json"},
                 json={"contents": [{"parts": [{"text": prompt}]}]},
-                timeout=50,
+                timeout=60,
             )
             if r.ok:
                 data = extract_json(r.json()["candidates"][0]["content"]["parts"][0]["text"])
-                if isinstance(data.get("beats"), list) and len(data["beats"]) >= 6:
+                if isinstance(data.get("beats"), list) and len(data["beats"]) >= 12:
                     return data
         except Exception:
             pass
@@ -141,59 +141,61 @@ def call_llm_for_story(prompt: str) -> dict | None:
 def build_unique_fallback(slot: int, history: list[dict]) -> dict:
     run_id = uuid.uuid4().hex[:6]
     idx = len(history) + slot
-    settings = [
-        ("منارة في بحر عاصف", "lighthouse", "night"),
-        ("غابة ضبابية قديمة", "forest", "fog"),
-        ("نفق قطار تحت الأرض", "tunnel", "night"),
-        ("مكتبة مهجورة ليلا", "library", "dusk"),
-        ("سفينة عالقة في الضباب", "ship", "fog"),
-        ("قبو قديم تحت منزل", "basement", "night"),
+    place_ar = "المنارة الساحلية القديمة"
+    env_kind = "lighthouse"
+    time_of_day = "night"
+    beats = [
+        {"caption": "عند منتصف الليل اقترب المحقق من المنارة الساحلية القديمة والبحر يضرب الصخور.", "env": env_kind, "time": time_of_day, "mood": "neutral", "action": "walk", "prop": "none", "has_shadow": False},
+        {"caption": "كانت المنارة مطفأة منذ سنوات طويلة لكن ضوءا خافتا ظهر في نافذتها العليا.", "env": env_kind, "time": time_of_day, "mood": "curious", "action": "point", "prop": "idea", "has_shadow": False},
+        {"caption": "دفع الباب الخشبي الثقيل فصدر صرير حاد تردد داخل البناء الفارغ.", "env": env_kind, "time": time_of_day, "mood": "surprised", "action": "alert", "prop": "exclamation", "has_shadow": False},
+        {"caption": "أشعل مصباحه اليدوي وبدأ يصعد الدرج الحجري الملتف خطوة بعد خطوة.", "env": env_kind, "time": time_of_day, "mood": "curious", "action": "walk", "prop": "none", "has_shadow": False},
+        {"caption": "على الجدار الحجري الرطب وجد آثار أقدام حديثة تتجه نحو الأعلى.", "env": env_kind, "time": time_of_day, "mood": "surprised", "action": "point", "prop": "idea", "has_shadow": False},
+        {"caption": "توقف فجأة عندما شعر بأن أحدا يقف خلفه في الظلام.", "env": env_kind, "time": time_of_day, "mood": "shocked", "action": "alert", "prop": "exclamation", "has_shadow": True},
+        {"caption": "استدار بسرعة فلم يجد أحدا لكن خيالا غريبا انعكس على الجدار.", "env": env_kind, "time": time_of_day, "mood": "shocked", "action": "alert", "prop": "exclamation", "has_shadow": True},
+        {"caption": "اقترب الخيال ببطء ثم أشار نحو صندوق معدني قديم في الزاوية.", "env": env_kind, "time": time_of_day, "mood": "surprised", "action": "point", "prop": "none", "has_shadow": True},
+        {"caption": "فتح المحقق الصندوق فوجد دفترا قديما يحمل تاريخ آخر ليلة عملت فيها المنارة.", "env": env_kind, "time": time_of_day, "mood": "curious", "action": "point", "prop": "speech", "has_shadow": False},
+        {"caption": "كانت الصفحات الأخيرة تحذر من أن الضوء لا ينطفئ بل يختبئ.", "env": env_kind, "time": time_of_day, "mood": "shocked", "action": "alert", "prop": "exclamation", "has_shadow": False},
+        {"caption": "وفجأة انطفأ المصباح اليدوي في يده وأصبح المكان غارقا في العتمة.", "env": env_kind, "time": time_of_day, "mood": "shocked", "action": "alert", "prop": "exclamation", "has_shadow": True},
+        {"caption": "سمع صوت همس خافت يطلب منه ألا ينظر نحو البحر.", "env": env_kind, "time": time_of_day, "mood": "shocked", "action": "alert", "prop": "speech", "has_shadow": True},
+        {"caption": "رفع رأسه نحو النافذة ليرى سفينة قديمة تتحرك بلا أضواء وسط الضباب.", "env": env_kind, "time": "fog", "mood": "shocked", "action": "point", "prop": "exclamation", "has_shadow": False},
+        {"caption": "وعندما عاد لينظر إلى الدفتر كانت الصفحة الأخيرة قد اختفت تماما.", "env": env_kind, "time": "night", "mood": "surprised", "action": "alert", "prop": "none", "has_shadow": True},
     ]
-    place_ar, env_kind, time_of_day = settings[idx % len(settings)]
     return {
         "title": f"ملف سري #{idx} [{run_id}]: سر {place_ar}",
-        "description": f"قصة غموض جديدة كلياً من سلسلة ملفات سرية داخل {place_ar}. تابع الأحداث حتى النهاية.",
-        "keywords": ["ملفات سرية", "pixel art", "قصص غموض", "شورتس", "قصة جديدة"],
+        "description": f"قصة غموض طويلة ومترابطة من سلسلة ملفات سرية داخل {place_ar}. تابع التفاصيل حتى النهاية.",
+        "keywords": ["ملفات سرية", "pixel art", "قصص غموض", "شورتس", "قصة طويلة"],
         "hashtags": ["#shorts", "#pixelart", "#ملفات_سرية", "#غموض", "#قصص"],
-        "thumbnail_text": place_ar[:14],
-        "beats": [
-            {"caption": f"وصلت إلى {place_ar} عند حلول الظلام.", "env": env_kind, "time": time_of_day, "mood": "neutral", "action": "walk", "prop": "none", "has_shadow": False},
-            {"caption": "الهواء كان باردا والأصوات تتردد بوضوح.", "env": env_kind, "time": time_of_day, "mood": "curious", "action": "point", "prop": "idea", "has_shadow": True},
-            {"caption": "لمحت حركة مفاجئة بين الظلال القريبة.", "env": env_kind, "time": time_of_day, "mood": "surprised", "action": "alert", "prop": "exclamation", "has_shadow": True},
-            {"caption": "تقدمت بحذر والقلب ينبض بسرعة شديدة.", "env": env_kind, "time": time_of_day, "mood": "curious", "action": "walk", "prop": "none", "has_shadow": True},
-            {"caption": "ظهر أمامي شيء لم أتوقع وجوده أبدا.", "env": env_kind, "time": time_of_day, "mood": "shocked", "action": "alert", "prop": "exclamation", "has_shadow": True},
-            {"caption": "حاولت فهم الرسالة قبل أن يختفي الأثر.", "env": env_kind, "time": time_of_day, "mood": "surprised", "action": "point", "prop": "speech", "has_shadow": False},
-            {"caption": "انقشع المشهد وبقي السؤال بلا إجابة.", "env": env_kind, "time": time_of_day, "mood": "shocked", "action": "alert", "prop": "heart", "has_shadow": True},
-        ],
+        "thumbnail_text": "سر المنارة",
+        "beats": beats,
     }
 
 
 def generate_unique_story_payload(slot: int, history: list[dict]) -> dict:
     now_utc = datetime.now(timezone.utc)
-    recent_titles = [clean_ar_text(h.get("title", "")) for h in history[-25:] if h.get("title")]
+    recent_titles = [clean_ar_text(h.get("title", "")) for h in history[-30:] if h.get("title")]
     avoid_block = "\n".join(f"- {t}" for t in recent_titles) if recent_titles else "- لا توجد قصص سابقة بعد"
 
     for attempt in range(4):
         nonce = uuid.uuid4().hex[:8]
         prompt = f"""
-ابتكر قصة غموض قصيرة جديدة كلياً ومختلفة تماماً عن أي قصة سابقة لقناة يوتيوب شورتس ("ملفات سرية").
-معرف الجلسة العشوائي: {nonce} | المحاولة: {attempt + 1} | التاريخ: {now_utc.strftime("%Y-%m-%d %H:%M")} UTC | الفترة: #{slot}.
+ابتكر قصة غموض عربية مترابطة ومشوقة وطويلة نسبياً لقناة يوتيوب شورتس ("ملفات سرية").
+معرف الجلسة: {nonce} | المحاولة: {attempt + 1} | التاريخ: {now_utc.strftime("%Y-%m-%d %H:%M")} UTC | الفترة: #{slot}.
 
-ممنوع منعاً باتاً تكرار أي فكرة أو مكان أو عنوان قريب من هذه القصص السابقة:
+المدة المطلوبة عند القراءة الصوتية: من 45 إلى 60 ثانية (14 إلى 15 مقطعاً متسلسلاً).
+ممنوع منعاً باتاً عمل قفزات غير منطقية أو جمل منفصلة؛ يجب أن تكون كل جملة استمراراً مباشراً وطبيعياً للجملة التي قبلها في نفس القصة والمكان.
+ممنوع تكرار هذه العناوين أو الأفكار السابقة:
 {avoid_block}
-
-اختر مكاناً جديداً وحبكة جديدة وأحداثاً مترابطة من البداية للنهاية (حوالي 7 إلى 8 مقاطع متسلسلة، كل مقطع جملة عربية واضحة من 5 إلى 9 كلمات بدون تشكيل).
 
 أعد النتيجة بصيغة JSON فقط بهذا الشكل:
 {{
-  "title": "عنوان جديد ومختلف كليا",
-  "description": "وصف قصير مشوق من جملتين باللغة العربية",
+  "title": "عنوان مشوق يعبر عن القصة كاملة",
+  "description": "وصف مشوق من جملتين باللغة العربية",
   "keywords": ["ملفات سرية", "pixel art", "قصص غموض", "شورتس", "قصة جديدة"],
   "hashtags": ["#shorts", "#pixelart", "#ملفات_سرية", "#غموض", "#قصص"],
   "thumbnail_text": "كلمتان",
   "beats": [
     {{
-      "caption": "جملة مترابطة 1",
+      "caption": "جملة مترابطة واضحة من 8 إلى 13 كلمة بدون تشكيل",
       "env": "lighthouse",
       "time": "night",
       "mood": "neutral",
@@ -204,15 +206,19 @@ def generate_unique_story_payload(slot: int, history: list[dict]) -> dict:
   ]
 }}
 
-القيم المسموحة:
-- "env": اختر من ["lighthouse", "forest", "tunnel", "library", "ship", "basement", "alley", "corridor", "room", "street"] ونوّعها بين المقاطع.
+القواعد الصارمة:
+- عدد المقاطع (beats) يجب أن يكون 14 إلى 15 مقطعاً مترابطاً تحكي قصة واحدة متماسكة من البداية إلى النهاية.
+- كل "caption" جملة عربية مترابطة من 8 إلى 13 كلمة بدون تشكيل.
+- حافظ على وحدة المكان والحدث ولا تغيّر المكان أو المزاج إلا لسبب درامي واضح داخل القصة.
+- "env": اختر من ["lighthouse", "forest", "tunnel", "library", "ship", "basement", "alley", "corridor", "room", "street"].
 - "time": اختر من ["night", "fog", "dusk", "day"].
 - "mood": اختر من ["neutral", "surprised", "shocked", "happy", "curious"].
 - "action": اختر من ["walk", "point", "alert", "wave"].
 - "prop": اختر من ["none", "exclamation", "idea", "speech", "heart"].
 """
         data = call_llm_for_story(prompt)
-        if data and not is_duplicate_story(data, history):
+        if data and isinstance(data.get("beats"), list) and len(data["beats"]) >= 12 and not is_duplicate_story(data, history):
+            data["beats"] = data["beats"][:15]
             return data
 
     return build_unique_fallback(slot, history)
@@ -528,7 +534,7 @@ async def generate_continuous_voice(beats: list[dict], audio_path: Path) -> list
     full_script = " ".join(lines)
 
     voice = "ar-SA-HamedNeural"
-    comm = edge_tts.Communicate(text=full_script, voice=voice, rate="+10%")
+    comm = edge_tts.Communicate(text=full_script, voice=voice, rate="+2%")
     with open(audio_path, "wb") as f:
         async for chunk in comm.stream():
             if chunk["type"] == "audio":
@@ -670,7 +676,7 @@ def main() -> None:
     slot = get_slot_number()
     history = load_history()
     payload = generate_unique_story_payload(slot, history)
-    beats = payload.get("beats", [])[:8]
+    beats = payload.get("beats", [])[:15]
     story_seed = int(story_fingerprint(payload)[:8], 16)
 
     formatted_description = build_formatted_description(payload)
