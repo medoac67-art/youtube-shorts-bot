@@ -1,9 +1,13 @@
 import asyncio
+from difflib import SequenceMatcher
+import hashlib
 import json
 import math
 import os
+import random
 import re
 import subprocess
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -16,7 +20,11 @@ from googleapiclient.http import MediaFileUpload
 from PIL import Image, ImageDraw, ImageFont
 
 OUT_DIR = Path("output")
+DATA_DIR = Path("data")
+HISTORY_FILE = DATA_DIR / "stories_history.json"
+
 OUT_DIR.mkdir(parents=True, exist_ok=True)
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 W, H = 1080, 1920
 GRID_W, GRID_H = 72, 128
@@ -27,6 +35,47 @@ PRIVACY_STATUS = "public"
 def clean_ar_text(text: str) -> str:
     no_diacritics = re.sub(r"[\u064B-\u065F\u0670]", "", str(text or ""))
     return re.sub(r"\s+", " ", no_diacritics).strip()
+
+
+def load_history() -> list[dict]:
+    if not HISTORY_FILE.exists():
+        return []
+    try:
+        data = json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def save_history(items: list[dict]) -> None:
+    HISTORY_FILE.write_text(json.dumps(items[-300:], ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def story_fingerprint(payload: dict) -> str:
+    title = clean_ar_text(payload.get("title", ""))
+    captions = " ".join(clean_ar_text(b.get("caption", "")) for b in payload.get("beats", []))
+    raw = f"{title} | {captions}".encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def is_duplicate_story(candidate: dict, history: list[dict]) -> bool:
+    cand_title = clean_ar_text(candidate.get("title", ""))
+    cand_text = " ".join(clean_ar_text(b.get("caption", "")) for b in candidate.get("beats", []))
+    cand_fp = story_fingerprint(candidate)
+
+    if not cand_title or len(cand_text) < 25:
+        return True
+
+    for item in history:
+        if item.get("fingerprint") == cand_fp:
+            return True
+        old_title = clean_ar_text(item.get("title", ""))
+        old_text = clean_ar_text(item.get("summary_text", ""))
+        if old_title and SequenceMatcher(None, cand_title, old_title).ratio() > 0.68:
+            return True
+        if old_text and SequenceMatcher(None, cand_text, old_text).ratio() > 0.62:
+            return True
+    return False
 
 
 def get_slot_number() -> int:
@@ -47,87 +96,10 @@ def extract_json(text: str) -> dict:
     return json.loads(raw)
 
 
-def generate_story_payload(slot: int) -> dict:
-    prompt = f"""
-Create a punchy, suspenseful Arabic short story (#{slot} of 4 daily shorts) for a mystery YouTube Shorts channel ("ملفات سرية") in a rich 16-bit pixel-art style.
-Return ONLY valid JSON with this exact structure:
-{{
-  "title": "عنوان قصير ومثير للفضول",
-  "description": "وصف قصير مشوق باللغة العربية من جملتين",
-  "keywords": ["ملفات سرية", "pixel art", "قصص غموض", "شورتس", "أنيميشن"],
-  "hashtags": ["#shorts", "#pixelart", "#ملفات_سرية", "#غموض", "#قصص"],
-  "thumbnail_text": "سر الليل",
-  "beats": [
-    {{
-      "caption": "في منتصف الليل",
-      "scene": "alley_night",
-      "mood": "neutral",
-      "action": "walk",
-      "prop": "none",
-      "has_shadow": true
-    }},
-    {{
-      "caption": "ظهر ظل يتحرك",
-      "scene": "alley_night",
-      "mood": "surprised",
-      "action": "point",
-      "prop": "exclamation",
-      "has_shadow": true
-    }},
-    {{
-      "caption": "يشير نحو باب مغلق",
-      "scene": "alley_night",
-      "mood": "curious",
-      "action": "point",
-      "prop": "idea",
-      "has_shadow": true
-    }},
-    {{
-      "caption": "فتحت الباب فجأة",
-      "scene": "corridor",
-      "mood": "shocked",
-      "action": "alert",
-      "prop": "exclamation",
-      "has_shadow": false
-    }},
-    {{
-      "caption": "كان الممر طويلا جدا",
-      "scene": "corridor",
-      "mood": "curious",
-      "action": "walk",
-      "prop": "speech",
-      "has_shadow": true
-    }},
-    {{
-      "caption": "في الصباح تغير كل شيء",
-      "scene": "street_day",
-      "mood": "happy",
-      "action": "wave",
-      "prop": "idea",
-      "has_shadow": false
-    }},
-    {{
-      "caption": "لكن السر بقي في الغرفة",
-      "scene": "room_night",
-      "mood": "shocked",
-      "action": "alert",
-      "prop": "heart",
-      "has_shadow": true
-    }}
-  ]
-}}
-
-Rules:
-- 7 to 8 short Arabic captions (2 to 4 words each), fast and engaging narration.
-- Do not use Arabic diacritics (تشكيل).
-- "scene" in ["alley_night", "corridor", "room_night", "street_day"].
-- "mood" in ["neutral", "surprised", "shocked", "happy", "curious"].
-- "action" in ["walk", "point", "alert", "wave"].
-- "prop" in ["none", "exclamation", "idea", "speech", "heart"].
-"""
+def call_llm_for_story(prompt: str) -> dict | None:
     for env_name, url, model in [
-        ("OPENROUTER_API_KEY", "https://openrouter.ai/api/v1/chat/completions", "openrouter/free"),
         ("GROQ_API_KEY", "https://api.groq.com/openai/v1/chat/completions", "llama-3.3-70b-versatile"),
+        ("OPENROUTER_API_KEY", "https://openrouter.ai/api/v1/chat/completions", "openrouter/free"),
         ("ZHIPU_API_KEY", "https://open.bigmodel.cn/api/paas/v4/chat/completions", "glm-4-flash"),
     ]:
         key = os.getenv(env_name, "").strip()
@@ -137,12 +109,12 @@ Rules:
             r = requests.post(
                 url,
                 headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                json={"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.75},
-                timeout=45,
+                json={"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 1.05},
+                timeout=50,
             )
             if r.ok:
                 data = extract_json(r.json()["choices"][0]["message"]["content"])
-                if isinstance(data.get("beats"), list) and len(data["beats"]) >= 4:
+                if isinstance(data.get("beats"), list) and len(data["beats"]) >= 6:
                     return data
         except Exception:
             pass
@@ -154,31 +126,96 @@ Rules:
                 f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={google_key}",
                 headers={"Content-Type": "application/json"},
                 json={"contents": [{"parts": [{"text": prompt}]}]},
-                timeout=45,
+                timeout=50,
             )
             if r.ok:
                 data = extract_json(r.json()["candidates"][0]["content"]["parts"][0]["text"])
-                if isinstance(data.get("beats"), list) and len(data["beats"]) >= 4:
+                if isinstance(data.get("beats"), list) and len(data["beats"]) >= 6:
                     return data
         except Exception:
             pass
 
+    return None
+
+
+def build_unique_fallback(slot: int, history: list[dict]) -> dict:
+    run_id = uuid.uuid4().hex[:6]
+    idx = len(history) + slot
+    settings = [
+        ("منارة في بحر عاصف", "lighthouse", "night"),
+        ("غابة ضبابية قديمة", "forest", "fog"),
+        ("نفق قطار تحت الأرض", "tunnel", "night"),
+        ("مكتبة مهجورة ليلا", "library", "dusk"),
+        ("سفينة عالقة في الضباب", "ship", "fog"),
+        ("قبو قديم تحت منزل", "basement", "night"),
+    ]
+    place_ar, env_kind, time_of_day = settings[idx % len(settings)]
     return {
-        "title": f"ملف سري #{slot}: ظل في منتصف الليل",
-        "description": "قصة غموض قصيرة بأسلوب Pixel Art من سلسلة ملفات سرية. ماذا يختبئ خلف الباب المغلق؟",
-        "keywords": ["ملفات سرية", "pixel art", "قصص غموض", "شورتس", "أنيميشن"],
+        "title": f"ملف سري #{idx} [{run_id}]: سر {place_ar}",
+        "description": f"قصة غموض جديدة كلياً من سلسلة ملفات سرية داخل {place_ar}. تابع الأحداث حتى النهاية.",
+        "keywords": ["ملفات سرية", "pixel art", "قصص غموض", "شورتس", "قصة جديدة"],
         "hashtags": ["#shorts", "#pixelart", "#ملفات_سرية", "#غموض", "#قصص"],
-        "thumbnail_text": "ملف سري",
+        "thumbnail_text": place_ar[:14],
         "beats": [
-            {"caption": "في منتصف الليل", "scene": "alley_night", "mood": "neutral", "action": "walk", "prop": "none", "has_shadow": True},
-            {"caption": "ظهر ظل يتحرك", "scene": "alley_night", "mood": "surprised", "action": "point", "prop": "exclamation", "has_shadow": True},
-            {"caption": "يشير نحو باب مغلق", "scene": "alley_night", "mood": "curious", "action": "point", "prop": "idea", "has_shadow": True},
-            {"caption": "فتحت الباب فجأة", "scene": "corridor", "mood": "shocked", "action": "alert", "prop": "exclamation", "has_shadow": False},
-            {"caption": "كان الممر طويلا جدا", "scene": "corridor", "mood": "curious", "action": "walk", "prop": "speech", "has_shadow": True},
-            {"caption": "في الصباح تغير كل شيء", "scene": "street_day", "mood": "happy", "action": "wave", "prop": "idea", "has_shadow": False},
-            {"caption": "لكن السر بقي في الغرفة", "scene": "room_night", "mood": "shocked", "action": "alert", "prop": "heart", "has_shadow": True},
+            {"caption": f"وصلت إلى {place_ar} عند حلول الظلام.", "env": env_kind, "time": time_of_day, "mood": "neutral", "action": "walk", "prop": "none", "has_shadow": False},
+            {"caption": "الهواء كان باردا والأصوات تتردد بوضوح.", "env": env_kind, "time": time_of_day, "mood": "curious", "action": "point", "prop": "idea", "has_shadow": True},
+            {"caption": "لمحت حركة مفاجئة بين الظلال القريبة.", "env": env_kind, "time": time_of_day, "mood": "surprised", "action": "alert", "prop": "exclamation", "has_shadow": True},
+            {"caption": "تقدمت بحذر والقلب ينبض بسرعة شديدة.", "env": env_kind, "time": time_of_day, "mood": "curious", "action": "walk", "prop": "none", "has_shadow": True},
+            {"caption": "ظهر أمامي شيء لم أتوقع وجوده أبدا.", "env": env_kind, "time": time_of_day, "mood": "shocked", "action": "alert", "prop": "exclamation", "has_shadow": True},
+            {"caption": "حاولت فهم الرسالة قبل أن يختفي الأثر.", "env": env_kind, "time": time_of_day, "mood": "surprised", "action": "point", "prop": "speech", "has_shadow": False},
+            {"caption": "انقشع المشهد وبقي السؤال بلا إجابة.", "env": env_kind, "time": time_of_day, "mood": "shocked", "action": "alert", "prop": "heart", "has_shadow": True},
         ],
     }
+
+
+def generate_unique_story_payload(slot: int, history: list[dict]) -> dict:
+    now_utc = datetime.now(timezone.utc)
+    recent_titles = [clean_ar_text(h.get("title", "")) for h in history[-25:] if h.get("title")]
+    avoid_block = "\n".join(f"- {t}" for t in recent_titles) if recent_titles else "- لا توجد قصص سابقة بعد"
+
+    for attempt in range(4):
+        nonce = uuid.uuid4().hex[:8]
+        prompt = f"""
+ابتكر قصة غموض قصيرة جديدة كلياً ومختلفة تماماً عن أي قصة سابقة لقناة يوتيوب شورتس ("ملفات سرية").
+معرف الجلسة العشوائي: {nonce} | المحاولة: {attempt + 1} | التاريخ: {now_utc.strftime("%Y-%m-%d %H:%M")} UTC | الفترة: #{slot}.
+
+ممنوع منعاً باتاً تكرار أي فكرة أو مكان أو عنوان قريب من هذه القصص السابقة:
+{avoid_block}
+
+اختر مكاناً جديداً وحبكة جديدة وأحداثاً مترابطة من البداية للنهاية (حوالي 7 إلى 8 مقاطع متسلسلة، كل مقطع جملة عربية واضحة من 5 إلى 9 كلمات بدون تشكيل).
+
+أعد النتيجة بصيغة JSON فقط بهذا الشكل:
+{{
+  "title": "عنوان جديد ومختلف كليا",
+  "description": "وصف قصير مشوق من جملتين باللغة العربية",
+  "keywords": ["ملفات سرية", "pixel art", "قصص غموض", "شورتس", "قصة جديدة"],
+  "hashtags": ["#shorts", "#pixelart", "#ملفات_سرية", "#غموض", "#قصص"],
+  "thumbnail_text": "كلمتان",
+  "beats": [
+    {{
+      "caption": "جملة مترابطة 1",
+      "env": "lighthouse",
+      "time": "night",
+      "mood": "neutral",
+      "action": "walk",
+      "prop": "none",
+      "has_shadow": false
+    }}
+  ]
+}}
+
+القيم المسموحة:
+- "env": اختر من ["lighthouse", "forest", "tunnel", "library", "ship", "basement", "alley", "corridor", "room", "street"] ونوّعها بين المقاطع.
+- "time": اختر من ["night", "fog", "dusk", "day"].
+- "mood": اختر من ["neutral", "surprised", "shocked", "happy", "curious"].
+- "action": اختر من ["walk", "point", "alert", "wave"].
+- "prop": اختر من ["none", "exclamation", "idea", "speech", "heart"].
+"""
+        data = call_llm_for_story(prompt)
+        if data and not is_duplicate_story(data, history):
+            return data
+
+    return build_unique_fallback(slot, history)
 
 
 def build_formatted_description(payload: dict) -> str:
@@ -200,104 +237,69 @@ def px_rect(draw: ImageDraw.ImageDraw, x0: int, y0: int, x1: int, y1: int, fill,
     draw.rectangle([x0 * PX, y0 * PX, (x1 + 1) * PX - 1, (y1 + 1) * PX - 1], fill=fill, outline=outline)
 
 
-def draw_alley_night(draw: ImageDraw.ImageDraw, frame_idx: int) -> None:
-    px_rect(draw, 0, 0, GRID_W - 1, 24, (22, 24, 52))
-    px_rect(draw, 0, 25, GRID_W - 1, 32, (36, 32, 68))
-    px_rect(draw, 10, 7, 17, 14, (245, 238, 185))
-    px_rect(draw, 12, 9, 15, 12, (255, 250, 210))
+def draw_dynamic_scene(draw: ImageDraw.ImageDraw, env: str, time_of_day: str, frame_idx: int, seed_offset: int) -> None:
+    rng = random.Random(seed_offset + (frame_idx // 6))
 
-    stars = [(4, 5), (22, 9), (34, 4), (45, 12), (56, 7), (64, 16), (28, 18), (8, 20)]
-    for idx_s, (sx, sy) in enumerate(stars):
-        if (frame_idx + idx_s) % 5 != 0:
+    if time_of_day == "day":
+        sky_top, sky_bot, ground_c = (112, 190, 245), (168, 222, 252), (82, 162, 74)
+    elif time_of_day == "dusk":
+        sky_top, sky_bot, ground_c = (66, 36, 86), (198, 92, 78), (56, 48, 74)
+    elif time_of_day == "fog":
+        sky_top, sky_bot, ground_c = (78, 92, 104), (126, 140, 148), (58, 72, 74)
+    else:
+        sky_top, sky_bot, ground_c = (20 + (seed_offset % 14), 22, 50 + (seed_offset % 18)), (34, 30, 66), (66, 64, 86)
+
+    px_rect(draw, 0, 0, GRID_W - 1, 28, sky_top)
+    px_rect(draw, 0, 29, GRID_W - 1, 36, sky_bot)
+
+    if time_of_day in ("night", "dusk"):
+        mx = 8 + (seed_offset % 46)
+        px_rect(draw, mx, 6, mx + 6, 12, (245, 238, 185))
+        for _ in range(8):
+            sx, sy = rng.randint(2, GRID_W - 3), rng.randint(2, 22)
             px_rect(draw, sx, sy, sx, sy, (240, 242, 255))
 
-    for bx in range(0, GRID_W, 12):
-        bh = 20 + ((bx * 3) % 7)
-        px_rect(draw, bx, 33 - bh, bx + 10, 32, (18, 18, 36))
-        for wy in range(35 - bh, 30, 5):
-            px_rect(draw, bx + 2, wy, bx + 3, wy + 2, (235, 210, 120))
-            px_rect(draw, bx + 7, wy, bx + 8, wy + 2, (110, 125, 165))
+    if env == "lighthouse":
+        px_rect(draw, 0, 76, GRID_W - 1, GRID_H - 1, (34, 78, 122))
+        px_rect(draw, 46, 18, 58, 78, (226, 228, 238), outline=(20, 22, 32))
+        for ry in range(24, 74, 12):
+            px_rect(draw, 46, ry, 58, ry + 5, (196, 58, 58))
+        px_rect(draw, 48, 12, 56, 18, (255, 232, 120))
+    elif env == "forest":
+        px_rect(draw, 0, 74, GRID_W - 1, GRID_H - 1, ground_c)
+        for tx in range(4, GRID_W - 6, 14):
+            px_rect(draw, tx, 38, tx + 4, 75, (74, 46, 30), outline=(18, 14, 12))
+            px_rect(draw, tx - 4, 22, tx + 8, 42, (36, 96, 58), outline=(16, 28, 20))
+    elif env == "tunnel":
+        px_rect(draw, 0, 0, GRID_W - 1, 86, (44, 48, 64))
+        px_rect(draw, 22, 24, 50, 86, (24, 26, 36), outline=(92, 98, 118))
+        px_rect(draw, 0, 87, GRID_W - 1, GRID_H - 1, (68, 70, 82))
+    elif env == "library":
+        px_rect(draw, 0, 0, GRID_W - 1, 86, (88, 56, 36))
+        for sx in range(4, GRID_W - 8, 18):
+            px_rect(draw, sx, 22, sx + 14, 76, (62, 38, 24), outline=(22, 16, 12))
+            for by in range(26, 72, 10):
+                px_rect(draw, sx + 2, by, sx + 12, by + 5, (168, 68, 58))
+        px_rect(draw, 0, 87, GRID_W - 1, GRID_H - 1, (112, 74, 46))
+    elif env == "ship":
+        px_rect(draw, 0, 78, GRID_W - 1, GRID_H - 1, (28, 66, 98))
+        px_rect(draw, 8, 54, 62, 80, (92, 54, 34), outline=(18, 14, 12))
+        px_rect(draw, 32, 18, 36, 54, (64, 40, 26))
+    elif env == "basement":
+        px_rect(draw, 0, 0, GRID_W - 1, 86, (58, 56, 68))
+        px_rect(draw, 30, 34, 42, 62, (32, 30, 38), outline=(16, 16, 20))
+        px_rect(draw, 0, 87, GRID_W - 1, GRID_H - 1, (76, 74, 86))
+    else:
+        px_rect(draw, 0, 36, GRID_W - 1, 86, (132, 68, 64))
+        for bx in range(4, GRID_W - 10, 16):
+            bh = 18 + ((bx + seed_offset) % 10)
+            px_rect(draw, bx, 37 - bh, bx + 12, 36, (34, 38, 58), outline=(16, 18, 28))
+        px_rect(draw, 0, 87, GRID_W - 1, GRID_H - 1, ground_c)
 
-    px_rect(draw, 0, 33, GRID_W - 1, 88, (152, 68, 58))
-    for row in range(34, 88, 4):
-        offset = 0 if ((row // 4) % 2 == 0) else 3
-        for col in range(offset, GRID_W, 7):
-            px_rect(draw, col, row, col + 5, row + 1, (178, 84, 72))
-            px_rect(draw, col, row + 2, col + 5, row + 3, (108, 44, 40))
-
-    px_rect(draw, 44, 54, 58, 88, (64, 38, 28), outline=(18, 16, 22))
-    px_rect(draw, 46, 56, 56, 86, (92, 54, 38))
-    px_rect(draw, 54, 71, 55, 73, (235, 195, 75))
-
-    px_rect(draw, 26, 44, 38, 58, (72, 42, 28), outline=(18, 16, 22))
-    for wy in range(46, 58, 4):
-        px_rect(draw, 28, wy, 36, wy + 2, (142, 88, 48))
-
-    px_rect(draw, 18, 35, 20, 88, (54, 58, 76), outline=(16, 16, 22))
-    px_rect(draw, 15, 35, 25, 37, (54, 58, 76), outline=(16, 16, 22))
-    lamp_col = (255, 224, 124) if (frame_idx % 7 != 0) else (195, 170, 95)
-    px_rect(draw, 20, 38, 24, 41, lamp_col)
-
-    px_rect(draw, 0, 89, GRID_W - 1, 95, (102, 100, 118))
-    px_rect(draw, 0, 96, GRID_W - 1, GRID_H - 1, (72, 70, 92))
-    for py in range(98, GRID_H - 1, 5):
-        for px_i in range(2, GRID_W - 2, 8):
-            shift = (px_i + py) % 3
-            px_rect(draw, px_i + shift, py, px_i + shift + 3, py + 1, (90, 88, 112))
-
-
-def draw_corridor(draw: ImageDraw.ImageDraw, frame_idx: int) -> None:
-    px_rect(draw, 0, 0, GRID_W - 1, 20, (48, 54, 94))
-    px_rect(draw, 0, 21, GRID_W - 1, 90, (64, 72, 118))
-    px_rect(draw, 0, 91, GRID_W - 1, GRID_H - 1, (92, 96, 138))
-
-    lights = [
-        (30, 22, 42, 27, (254, 242, 180)),
-        (32, 35, 40, 38, (232, 222, 166)),
-        (34, 45, 38, 47, (206, 200, 160)),
-    ]
-    for x0, y0, x1, y1, col in lights:
-        px_rect(draw, x0, y0, x1, y1, col)
-
-    px_rect(draw, 8, 42, 18, 88, (44, 112, 118), outline=(18, 20, 32))
-    px_rect(draw, 54, 42, 64, 88, (44, 112, 118), outline=(18, 20, 32))
-    swing = (frame_idx // 4) % 2
-    px_rect(draw, 1, 28, 8 + swing, 90, (54, 132, 138), outline=(18, 20, 32))
-
-
-def draw_room_night(draw: ImageDraw.ImageDraw, frame_idx: int) -> None:
-    px_rect(draw, 0, 0, GRID_W - 1, 90, (96, 62, 42))
-    for wx in range(0, GRID_W, 8):
-        px_rect(draw, wx, 0, wx + 6, 90, (112, 74, 50))
-    px_rect(draw, 0, 91, GRID_W - 1, GRID_H - 1, (76, 48, 32))
-
-    px_rect(draw, 44, 24, 60, 46, (24, 28, 56), outline=(22, 16, 12))
-    px_rect(draw, 52, 24, 52, 46, (45, 32, 24))
-    px_rect(draw, 44, 35, 60, 35, (45, 32, 24))
-    if frame_idx % 5 != 0:
-        px_rect(draw, 48, 28, 48, 28, (242, 242, 255))
-        px_rect(draw, 56, 39, 56, 39, (242, 242, 255))
-
-
-def draw_street_day(draw: ImageDraw.ImageDraw, frame_idx: int) -> None:
-    px_rect(draw, 0, 0, GRID_W - 1, 46, (118, 194, 245))
-    cloud_x = 8 + (frame_idx % 14)
-    px_rect(draw, cloud_x, 9, cloud_x + 10, 12, (248, 252, 255))
-    px_rect(draw, cloud_x + 3, 6, cloud_x + 7, 9, (248, 252, 255))
-
-    px_rect(draw, 5, 18, 24, 70, (150, 168, 196), outline=(28, 34, 48))
-    px_rect(draw, 29, 13, 48, 70, (198, 142, 118), outline=(28, 34, 48))
-    px_rect(draw, 52, 24, 70, 70, (124, 152, 184), outline=(28, 34, 48))
-
-    for wy in range(21, 64, 8):
-        for wx in [9, 17, 33, 41, 56, 63]:
-            px_rect(draw, wx, wy, wx + 3, wy + 4, (255, 236, 150))
-
-    px_rect(draw, 0, 71, GRID_W - 1, 80, (176, 178, 188))
-    px_rect(draw, 0, 81, GRID_W - 1, 98, (68, 72, 82))
-    for rx in range(3, GRID_W, 10):
-        px_rect(draw, rx, 89, rx + 5, 90, (240, 215, 90))
-    px_rect(draw, 0, 99, GRID_W - 1, GRID_H - 1, (86, 168, 76))
+    if time_of_day == "fog":
+        fog_shift = (frame_idx * 2) % 12
+        for fy in range(42, 86, 10):
+            px_rect(draw, fog_shift, fy, GRID_W - 12 + (fog_shift // 2), fy + 2, (195, 205, 212))
 
 
 def draw_character(
@@ -404,37 +406,54 @@ def load_arabic_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     return ImageFont.load_default()
 
 
-def render_beat_frames(beat: dict, beat_idx: int, duration_sec: float, fps: int = 12) -> list[Path]:
-    num_frames = max(int(round(duration_sec * fps)), 8)
-    scene_name = str(beat.get("scene", "alley_night")).strip()
+def wrap_caption_lines(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, max_w: int) -> list[str]:
+    words = text.split()
+    if not words:
+        return []
+    lines: list[str] = []
+    cur = words[0]
+    for w in words[1:]:
+        test = f"{cur} {w}"
+        bbox = draw.textbbox((0, 0), test, font=font)
+        if (bbox[2] - bbox[0]) <= max_w:
+            cur = test
+        else:
+            lines.append(cur)
+            cur = w
+    lines.append(cur)
+    return lines[:2]
+
+
+def render_beat_frames(beat: dict, beat_idx: int, duration_sec: float, story_seed: int, fps: int = 12) -> list[Path]:
+    num_frames = max(int(round(duration_sec * fps)), 10)
+    env = str(beat.get("env", "lighthouse")).strip()
+    time_of_day = str(beat.get("time", "night")).strip()
     mood = str(beat.get("mood", "neutral")).strip()
     action = str(beat.get("action", "walk")).strip()
     prop = str(beat.get("prop", "none")).strip()
     has_shadow = bool(beat.get("has_shadow", True))
     caption_raw = clean_ar_text(beat.get("caption", ""))
 
-    font_cap = load_arabic_font(58)
+    shirt_palette = [
+        (102, 112, 212),
+        (214, 96, 88),
+        (72, 168, 138),
+        (218, 152, 66),
+        (158, 98, 214),
+    ]
+    shirt_color = shirt_palette[(story_seed + beat_idx) % len(shirt_palette)]
+    font_cap = load_arabic_font(52)
     out_frames: list[Path] = []
 
     for f_i in range(num_frames):
         img = Image.new("RGB", (W, H), (18, 18, 32))
         draw = ImageDraw.Draw(img)
 
-        if scene_name == "corridor":
-            draw_corridor(draw, f_i)
-            char_y = 92
-        elif scene_name == "room_night":
-            draw_room_night(draw, f_i)
-            char_y = 92
-        elif scene_name == "street_day":
-            draw_street_day(draw, f_i)
-            char_y = 98
-        else:
-            draw_alley_night(draw, f_i)
-            char_y = 92
+        draw_dynamic_scene(draw, env, time_of_day, f_i, story_seed + beat_idx * 37)
+        char_y = 92
 
-        drift = int(math.sin((f_i / max(num_frames, 1)) * math.pi) * 5)
-        char_x = 22 + drift
+        drift = int(math.sin((f_i / max(num_frames, 1)) * math.pi) * 6)
+        char_x = 16 + ((story_seed + beat_idx * 5) % 14) + drift
         draw_character(
             draw,
             char_x,
@@ -442,12 +461,12 @@ def render_beat_frames(beat: dict, beat_idx: int, duration_sec: float, fps: int 
             f_i,
             mood=mood,
             action=action,
-            shirt_color=(102, 112, 212),
+            shirt_color=shirt_color,
             is_shadow=False,
         )
 
         if has_shadow:
-            shadow_x = 46 - (drift // 2)
+            shadow_x = min(char_x + 22 - (drift // 2), GRID_W - 8)
             draw_character(
                 draw,
                 shadow_x,
@@ -462,20 +481,25 @@ def render_beat_frames(beat: dict, beat_idx: int, duration_sec: float, fps: int 
             draw_prop(draw, char_x, char_y, prop, f_i)
 
         if caption_raw:
-            bbox = draw.textbbox((0, 0), caption_raw, font=font_cap)
-            tw = bbox[2] - bbox[0]
-            th = bbox[3] - bbox[1]
-            box_w = min(tw + 70, W - 80)
-            box_h = th + 42
+            lines = wrap_caption_lines(draw, caption_raw, font_cap, W - 140)
+            line_boxes = [draw.textbbox((0, 0), ln, font=font_cap) for ln in lines]
+            line_h = max([(b[3] - b[1]) for b in line_boxes] or [56])
+            max_line_w = max([(b[2] - b[0]) for b in line_boxes] or [200])
+
+            box_w = min(max_line_w + 76, W - 70)
+            box_h = len(lines) * (line_h + 10) + 34
             bx0 = (W - box_w) // 2
-            by0 = 1430
+            by0 = 1410
             bx1 = bx0 + box_w
             by1 = by0 + box_h
 
-            draw.rounded_rectangle([bx0, by0, bx1, by1], radius=20, fill=(14, 16, 26), outline=(120, 210, 175), width=3)
-            tx = (W - tw) // 2
-            ty = by0 + (box_h - th) // 2 - 4
-            draw.text((tx, ty), caption_raw, font=font_cap, fill=(255, 255, 255))
+            draw.rounded_rectangle([bx0, by0, bx1, by1], radius=22, fill=(14, 16, 26), outline=(120, 210, 175), width=3)
+            cur_y = by0 + 16
+            for ln, b in zip(lines, line_boxes):
+                lw = b[2] - b[0]
+                lx = (W - lw) // 2
+                draw.text((lx, cur_y), ln, font=font_cap, fill=(255, 255, 255))
+                cur_y += line_h + 10
 
         frame_path = OUT_DIR / f"beat_{beat_idx:02d}_f{f_i:03d}.png"
         img.save(frame_path)
@@ -501,11 +525,10 @@ def get_audio_duration(audio_path: Path) -> float:
 
 async def generate_continuous_voice(beats: list[dict], audio_path: Path) -> list[float]:
     lines = [clean_ar_text(b.get("caption", "")) or "ملفات سرية" for b in beats]
-    full_script = ". ".join(lines) + "."
+    full_script = " ".join(lines)
 
-    # صوت واضح ومتصل بسرعة أسرع وأكثر حيوية دون تقطيع بين الجمل
     voice = "ar-SA-HamedNeural"
-    comm = edge_tts.Communicate(text=full_script, voice=voice, rate="+20%")
+    comm = edge_tts.Communicate(text=full_script, voice=voice, rate="+10%")
     with open(audio_path, "wb") as f:
         async for chunk in comm.stream():
             if chunk["type"] == "audio":
@@ -514,7 +537,7 @@ async def generate_continuous_voice(beats: list[dict], audio_path: Path) -> list
     total_dur = get_audio_duration(audio_path)
     weights = [max(len(re.findall(r"\S+", line)), 1) for line in lines]
     weight_sum = sum(weights) or len(lines)
-    return [max((w / weight_sum) * total_dur, 1.0) for w in weights]
+    return [max((w / weight_sum) * total_dur, 1.5) for w in weights]
 
 
 def create_thumbnail(first_frame: Path, thumb_text: str, out_thumb: Path) -> None:
@@ -530,11 +553,11 @@ def create_thumbnail(first_frame: Path, thumb_text: str, out_thumb: Path) -> Non
     im.save(out_thumb)
 
 
-def render_video_from_beats(beats: list[dict], beat_durations: list[float], audio_path: Path, out_video: Path) -> None:
+def render_video_from_beats(beats: list[dict], beat_durations: list[float], audio_path: Path, story_seed: int, out_video: Path) -> None:
     fps = 12
     all_frames: list[Path] = []
     for idx, (beat, dur) in enumerate(zip(beats, beat_durations)):
-        frames = render_beat_frames(beat, idx, dur, fps=fps)
+        frames = render_beat_frames(beat, idx, dur, story_seed=story_seed, fps=fps)
         all_frames.extend(frames)
 
     frames_txt = OUT_DIR / "frames.txt"
@@ -645,8 +668,10 @@ def upload_to_youtube(
 
 def main() -> None:
     slot = get_slot_number()
-    payload = generate_story_payload(slot)
+    history = load_history()
+    payload = generate_unique_story_payload(slot, history)
     beats = payload.get("beats", [])[:8]
+    story_seed = int(story_fingerprint(payload)[:8], 16)
 
     formatted_description = build_formatted_description(payload)
     meta = {
@@ -661,7 +686,7 @@ def main() -> None:
     beat_durations = asyncio.run(generate_continuous_voice(beats, audio_path))
 
     video_path = OUT_DIR / "short_final.mp4"
-    render_video_from_beats(beats, beat_durations, audio_path, video_path)
+    render_video_from_beats(beats, beat_durations, audio_path, story_seed, video_path)
 
     first_frame = OUT_DIR / "beat_00_f000.png"
     thumb_path = OUT_DIR / "thumbnail.png"
@@ -676,6 +701,16 @@ def main() -> None:
         keywords=payload.get("keywords", []),
         privacy_status=PRIVACY_STATUS,
     )
+
+    history.append(
+        {
+            "date_utc": datetime.now(timezone.utc).isoformat(),
+            "title": meta["title"],
+            "summary_text": " ".join(clean_ar_text(b.get("caption", "")) for b in beats),
+            "fingerprint": story_fingerprint(payload),
+        }
+    )
+    save_history(history)
 
     print("DONE! Generated:", video_path, thumb_path)
     print("\n--- DESCRIPTION ---\n" + formatted_description)
