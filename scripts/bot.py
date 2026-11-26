@@ -39,29 +39,23 @@ DEFAULT_FISH_KEYS = [
     "sk-fish-LGMwCDbpMZwCYU_bBXAYOD0V-UKy16Ut3iEfXZ9T3s8",
 ]
 
+# نركز على النبرات الهادئة والغامضة فقط ونتجنب الحماس المفرط أو الفرح
 EMOTE_ALIAS_MAP = {
-    "lauging": "laughing",
-    "laugh": "laughing",
-    "laughs": "laughing",
-    "giggle": "laughing",
     "whisper": "whispering",
     "sigh": "sighing",
     "gasp": "gasping",
-    "scream": "shouting",
-    "shout": "shouting",
+    "laugh": "sighing",
+    "lauging": "sighing",
+    "laughing": "sighing",
+    "excited": "nervous",
 }
 
 ALLOWED_EMOTES = {
-    "laughing",
     "whispering",
     "sighing",
     "gasping",
-    "shouting",
-    "excited",
-    "surprised",
-    "sad",
-    "angry",
     "nervous",
+    "sad",
 }
 
 COMMON_AR_FIXES = {
@@ -91,6 +85,9 @@ COMMON_AR_FIXES = {
     "سرا": "سراً",
     "ليلا": "ليلاً",
     "صباحا": "صباحاً",
+    "سرورية": "غامضة",
+    "المتدلية": "القديمة",
+    "داخليا": "داخلياً",
 }
 
 
@@ -100,6 +97,25 @@ def normalize_emote_name(raw_tag: str) -> str:
     if tag in EMOTE_ALIAS_MAP:
         tag = EMOTE_ALIAS_MAP[tag]
     return tag if tag in ALLOWED_EMOTES else ""
+
+
+def enrich_natural_pauses(text: str) -> str:
+    """إضافة فواصل وعلامات توقف طبيعية لتهدئة الإيقاع ومنع القراءة السريعة المتصلة."""
+    s = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not s:
+        return s
+    # فصل الجمل الطويلة بفواصل طبيعية بعد أدوات الربط والظروف
+    connectors = [
+        "ثم ", "بعدها ", "وعندما ", "حين ", "فإذا ", "لكنه ", "لكن ",
+        "ببطء ", "بصمت ", "في تلك اللحظة ", "على الفور ", "من خلفه ",
+    ]
+    for conn in connectors:
+        s = re.sub(rf"(?<!،\s)(?<!\.\.\.\s)\b{re.escape(conn.strip())}\b", f"، {conn.strip()}", s)
+    s = re.sub(r"^،\s*", "", s)
+    s = re.sub(r"\s*،\s*،", "،", s)
+    s = re.sub(r"\s+([،.!?؛:])", r"\1", s)
+    s = re.sub(r"([،.!?؛:])([^\s\d\.])", r"\1 \2", s)
+    return re.sub(r"\s+", " ", s).strip()
 
 
 def normalize_brackets_in_speech_text(text: str) -> str:
@@ -115,8 +131,8 @@ def normalize_brackets_in_speech_text(text: str) -> str:
 
     s = re.sub(r"\[([^\[\]]+)\]", _repl, s)
     s = re.sub(r"<[^<>]+>", " ", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
+    s = enrich_natural_pauses(s)
+    return re.sub(r"\s+", " ", s).strip()
 
 
 def format_tts_for_provider(text: str, provider: str) -> str:
@@ -147,8 +163,69 @@ def fix_arabic_spelling(text: str) -> str:
         cleaned = re.sub(rf"(?<!\S){re.escape(wrong)}(?!\S)", right, cleaned)
 
     cleaned = re.sub(r"\s+([،.!?؛:])", r"\1", cleaned)
-    cleaned = re.sub(r"([،.!?؛:])([^\s\d])", r"\1 \2", cleaned)
+    cleaned = re.sub(r"([،.!?؛:])([^\s\d\.])", r"\1 \2", cleaned)
     return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def clean_tag_token(raw: str) -> str:
+    tok = fix_arabic_spelling(strip_emotes_for_caption(str(raw or ""))).lstrip("#").strip()
+    tok = re.sub(r"[^\w\u0600-\u06FF]+", "_", tok, flags=re.UNICODE).strip("_")
+    return f"#{tok}" if tok else ""
+
+
+def enforce_title_with_emojis_and_1_to_3_tags(title: str, tags_pool: list[str] | None = None, fallback_title: str = "سر الغرفة المظلمة") -> str:
+    raw = str(title or "")
+    emojis = re.findall(r"[\U0001F300-\U0001FAFF\u2600-\u27BF]", raw)
+    title_tags = [clean_tag_token(t) for t in re.findall(r"#[^\s#]+", raw)]
+    title_tags = [t for t in title_tags if t][:3]
+
+    if not title_tags:
+        for cand in (tags_pool or []):
+            t = clean_tag_token(cand)
+            if t and t.lower() not in [x.lower() for x in title_tags]:
+                title_tags.append(t)
+            if len(title_tags) >= 2:
+                break
+    if not title_tags:
+        title_tags = ["#shorts", "#غموض"]
+
+    no_tags = re.sub(r"#[^\s#]+", "", raw)
+    clean_text = fix_arabic_spelling(strip_emotes_for_caption(no_tags))
+    words = [w for w in clean_text.split() if w.strip()][:5]
+    short_title = " ".join(words).strip() or fallback_title
+
+    e1 = emojis[0] if len(emojis) >= 1 else "🕯️"
+    e2 = emojis[1] if len(emojis) >= 2 else "👁️"
+
+    combined = f"{short_title} {e1}{e2} {' '.join(title_tags[:3])}".strip()
+    return combined[:95].strip()
+
+
+def build_large_description_hashtags(raw_tags: list[str] | None, extra_keywords: list[str] | None = None, max_tags: int = 500) -> list[str]:
+    base_pool = [
+        "shorts", "pixelart", "غموض", "قصص_غموض", "ملفات_سرية", "رعب", "قصص_رعب",
+        "تشويق", "قصة_قصيرة", "مغامرة", "أرشيف_سري", "ليالي_الغموض", "قصة_حقيقية",
+        "حكايات", "تاريخ_غامض", "سر_خطير", "نهاية_صادمة", "ظلام", "أشباح", "ألغاز",
+        "تحقيق", "قصة_اليوم", "ترند", "اكسبلور", "fyp", "viral", "mystery", "story",
+        "creepy", "thriller", "darkstory", "pixel_art", "8bit", "16bit", "retro",
+        "secretfiles", "unsolved", "scarystory", "horrorstories", "shortstory",
+    ]
+    seen: set[str] = set()
+    result: list[str] = []
+
+    for src in [*(raw_tags or []), *(extra_keywords or []), *base_pool]:
+        t = clean_tag_token(src)
+        if not t:
+            continue
+        low = t.lower()
+        if low in seen:
+            continue
+        seen.add(low)
+        result.append(t)
+        if len(result) >= max_tags:
+            break
+
+    return result
 
 
 def call_llm_raw(prompt: str, temperature: float = 0.85) -> str | None:
@@ -201,8 +278,6 @@ def extract_json(text: str) -> dict:
 
 
 def polish_arabic_payload(payload: dict) -> dict:
-    title_in = fix_arabic_spelling(strip_emotes_for_caption(payload.get("title", "")))
-    desc_in = fix_arabic_spelling(strip_emotes_for_caption(payload.get("description", "")))
     thumb_in = fix_arabic_spelling(strip_emotes_for_caption(payload.get("thumbnail_text", "")))
     beats_in = payload.get("beats", [])
 
@@ -210,52 +285,98 @@ def polish_arabic_payload(payload: dict) -> dict:
         raw_speech = str(b.get("speech_text") or b.get("caption") or "")
         b["speech_text"] = normalize_brackets_in_speech_text(fix_arabic_spelling(raw_speech))
         raw_cap = str(b.get("caption") or strip_emotes_for_caption(raw_speech))
-        b["caption"] = fix_arabic_spelling(strip_emotes_for_caption(raw_cap))
+        b["caption"] = enrich_natural_pauses(fix_arabic_spelling(strip_emotes_for_caption(raw_cap)))
+
+    title_in = enforce_title_with_emojis_and_1_to_3_tags(
+        payload.get("title", ""),
+        tags_pool=payload.get("title_hashtags") or payload.get("hashtags") or [],
+    )
 
     review_prompt = f"""
-راجع النصوص العربية التالية وصحح جميع الأخطاء الإملائية والنحوية وعلامات الترقيم دون تغيير المعنى أو عدد المقاطع ({len(beats_in)} مقطعاً).
-اجعل أسلوب الإلقاء طبيعياً مع علامات ترقيم واضحة (مثل ... و ، و ؟ و !) دون غناء أو مبالغة لفظية.
+راجع النصوص العربية التالية وصحح جميع الأخطاء الإملائية والصياغة غير الطبيعية وعلامات الترقيم دون تغيير عدد المقاطع ({len(beats_in)} مقطعاً).
+اجعل الجمل متماسكة كقصة واحدة متصلة في نفس المكان والحدث، وأكثر الفواصل (،) وعلامات الترقيم الطبيعية لتنظيم التنفس.
 أعد النتيجة بصيغة JSON فقط بنفس المفاتيح:
 {{
-  "title": "...",
-  "description": "...",
-  "thumbnail_text": "...",
+  "title": "عنوان قصير جذاب (3 إلى 5 كلمات) مع إيموجيين اثنين ومن هاشتاج إلى 3 هاشتاجات فقط",
+  "hook_questions": ["سؤال مشوق 1؟", "سؤال مشوق 2؟"],
+  "video_points": ["نقطة 1", "نقطة 2", "نقطة 3"],
+  "viral_keywords": ["كلمة 1", "كلمة 2", "كلمة 3", "كلمة 4", "كلمة 5"],
+  "description_hashtags": ["#shorts", "#pixelart", "#غموض"],
+  "thumbnail_text": "كلمتان",
   "captions": ["...", "..."]
 }}
 
 المدخلات:
-{json.dumps({"title": title_in, "description": desc_in, "thumbnail_text": thumb_in, "captions": [b.get("caption", "") for b in beats_in]}, ensure_ascii=False)}
+{json.dumps({
+    "title": title_in,
+    "hook_questions": payload.get("hook_questions", []),
+    "video_points": payload.get("video_points", []),
+    "viral_keywords": payload.get("viral_keywords", []),
+    "description_hashtags": payload.get("description_hashtags") or payload.get("hashtags") or [],
+    "thumbnail_text": thumb_in,
+    "captions": [b.get("caption", "") for b in beats_in]
+}, ensure_ascii=False)}
 """
     raw_rev = call_llm_raw(review_prompt, temperature=0.2)
     if raw_rev:
         try:
             rev = extract_json(raw_rev)
-            if fix_arabic_spelling(rev.get("title", "")):
-                payload["title"] = fix_arabic_spelling(strip_emotes_for_caption(rev["title"]))
-            if fix_arabic_spelling(rev.get("description", "")):
-                payload["description"] = fix_arabic_spelling(strip_emotes_for_caption(rev["description"]))
+            if rev.get("title"):
+                payload["title"] = enforce_title_with_emojis_and_1_to_3_tags(
+                    rev["title"],
+                    tags_pool=payload.get("title_hashtags") or [],
+                )
+            if isinstance(rev.get("hook_questions"), list) and rev["hook_questions"]:
+                payload["hook_questions"] = [fix_arabic_spelling(strip_emotes_for_caption(q)) for q in rev["hook_questions"] if fix_arabic_spelling(q)][:3]
+            if isinstance(rev.get("video_points"), list) and rev["video_points"]:
+                payload["video_points"] = [fix_arabic_spelling(strip_emotes_for_caption(p)) for p in rev["video_points"] if fix_arabic_spelling(p)][:4]
+            if isinstance(rev.get("viral_keywords"), list) and rev["viral_keywords"]:
+                payload["viral_keywords"] = [fix_arabic_spelling(strip_emotes_for_caption(k)) for k in rev["viral_keywords"] if fix_arabic_spelling(k)][:8]
+            if isinstance(rev.get("description_hashtags"), list) and rev["description_hashtags"]:
+                payload["description_hashtags"] = build_large_description_hashtags(
+                    [*rev["description_hashtags"], *(payload.get("description_hashtags") or [])],
+                    extra_keywords=payload.get("viral_keywords") or [],
+                    max_tags=500,
+                )
             if fix_arabic_spelling(rev.get("thumbnail_text", "")):
                 payload["thumbnail_text"] = fix_arabic_spelling(strip_emotes_for_caption(rev["thumbnail_text"]))
             rev_caps = rev.get("captions", [])
             if isinstance(rev_caps, list) and len(rev_caps) == len(beats_in):
                 for idx, cap in enumerate(rev_caps):
-                    fixed_c = fix_arabic_spelling(strip_emotes_for_caption(cap))
+                    fixed_c = enrich_natural_pauses(fix_arabic_spelling(strip_emotes_for_caption(cap)))
                     if fixed_c:
                         beats_in[idx]["caption"] = fixed_c
                         old_speech = beats_in[idx].get("speech_text", "")
-                        tags_found = re.findall(r"\[[^\[\]]+\]", old_speech)
-                        if tags_found:
-                            beats_in[idx]["speech_text"] = f"{fixed_c} {' '.join(tags_found)}".strip()
-                        else:
-                            beats_in[idx]["speech_text"] = fixed_c
+                        tags_found = [t for t in re.findall(r"\[[^\[\]]+\]", old_speech) if normalize_emote_name(t.strip("[]"))]
+                        beats_in[idx]["speech_text"] = f"{fixed_c} {' '.join(tags_found)}".strip() if tags_found else fixed_c
         except Exception:
             pass
 
-    payload["title"] = fix_arabic_spelling(strip_emotes_for_caption(payload.get("title", "")))
-    payload["description"] = fix_arabic_spelling(strip_emotes_for_caption(payload.get("description", "")))
-    payload["thumbnail_text"] = fix_arabic_spelling(strip_emotes_for_caption(payload.get("thumbnail_text", "")))
+    payload["hook_questions"] = [fix_arabic_spelling(strip_emotes_for_caption(q)) for q in (payload.get("hook_questions") or []) if fix_arabic_spelling(q)][:3] or [
+        "ماذا كان مكتوباً في الصفحة الأخيرة؟",
+        "لماذا توقف الصوت فجأة داخل الغرفة؟",
+    ]
+    payload["video_points"] = [fix_arabic_spelling(strip_emotes_for_caption(p)) for p in (payload.get("video_points") or []) if fix_arabic_spelling(p)][:4] or [
+        "دخول هادئ إلى غرفة الأرشيف في منتصف الليل",
+        "اكتشاف دفتر قديم يحمل تفاصيل غير متوقعة",
+        "انكشاف الحقيقة الغامضة في اللحظة الأخيرة",
+    ]
+    payload["viral_keywords"] = [fix_arabic_spelling(strip_emotes_for_caption(k)) for k in (payload.get("viral_keywords") or []) if fix_arabic_spelling(k)][:8] or [
+        "ملفات سرية", "غموض", "بيكسل آرت", "قصة غامضة", "شورتس"
+    ]
+    payload["description_hashtags"] = build_large_description_hashtags(
+        payload.get("description_hashtags") or payload.get("hashtags") or [],
+        extra_keywords=payload["viral_keywords"],
+        max_tags=500,
+    )
+    payload["title"] = enforce_title_with_emojis_and_1_to_3_tags(
+        payload.get("title", ""),
+        tags_pool=payload.get("title_hashtags") or payload["description_hashtags"][:3],
+    )
+    payload["thumbnail_text"] = fix_arabic_spelling(strip_emotes_for_caption(payload.get("thumbnail_text", ""))) or "ملف سري"
+
     for b in beats_in:
-        b["caption"] = fix_arabic_spelling(strip_emotes_for_caption(b.get("caption", "")))
+        b["caption"] = enrich_natural_pauses(fix_arabic_spelling(strip_emotes_for_caption(b.get("caption", ""))))
         b["speech_text"] = normalize_brackets_in_speech_text(b.get("speech_text") or b["caption"])
 
     return payload
@@ -312,7 +433,7 @@ def get_slot_number() -> int:
 
 
 def call_llm_for_story(prompt: str) -> dict | None:
-    raw = call_llm_raw(prompt, temperature=1.0)
+    raw = call_llm_raw(prompt, temperature=0.85)
     if not raw:
         return None
     try:
@@ -325,32 +446,39 @@ def call_llm_for_story(prompt: str) -> dict | None:
 
 
 def build_unique_fallback(slot: int, history: list[dict]) -> dict:
-    run_id = uuid.uuid4().hex[:6]
+    run_id = uuid.uuid4().hex[:4]
     idx = len(history) + slot
-    place_ar = "غرفة الأرشيف القديمة"
     env_kind = "library"
     time_of_day = "night"
     beats = [
-        {"caption": "في منتصف الليل... دخلت غرفة الأرشيف القديمة.", "speech_text": "في منتصف الليل... دخلت غرفة الأرشيف القديمة.", "env": env_kind, "time": time_of_day, "mood": "neutral", "action": "walk", "prop": "none", "has_shadow": False},
-        {"caption": "كانت المصابيح منطفئة، إلا ضوءاً خافتاً ينبعث من خلف الخزانة!", "speech_text": "كانت المصابيح منطفئة... إلا ضوءاً خافتاً ينبعث من خلف الخزانة! [whispering]", "env": env_kind, "time": time_of_day, "mood": "curious", "action": "point", "prop": "idea", "has_shadow": False},
-        {"caption": "اقتربت ببطء... وسمعت صوت نقر منتظم كأنه آلة كاتبة.", "speech_text": "اقتربت ببطء... وسمعت صوت نقر منتظم، كأنه آلة كاتبة.", "env": env_kind, "time": time_of_day, "mood": "surprised", "action": "alert", "prop": "exclamation", "has_shadow": False},
-        {"caption": "كيف تعمل آلة قديمة... والمكان مهجور منذ سنوات؟", "speech_text": "كيف تعمل آلة قديمة... والمكان مهجور منذ سنوات؟ [nervous]", "env": env_kind, "time": time_of_day, "mood": "curious", "action": "point", "prop": "none", "has_shadow": False},
-        {"caption": "أزحت الستار القماشي... فوجدت أوراقاً مكتوبة بتاريخ الغد!", "speech_text": "أزحت الستار القماشي... فوجدت أوراقاً مكتوبة بتاريخ الغد! [surprised]", "env": env_kind, "time": time_of_day, "mood": "surprised", "action": "point", "prop": "idea", "has_shadow": False},
-        {"caption": "توقف قلبي فجأة... حين لمحت ظلاً يقف عند الباب!", "speech_text": "توقف قلبي فجأة... حين لمحت ظلاً يقف عند الباب! [gasping]", "env": env_kind, "time": time_of_day, "mood": "shocked", "action": "alert", "prop": "exclamation", "has_shadow": True},
-        {"caption": "لم يكن ظل شخص عادي... بل هيئة تتحرك بصمت تام.", "speech_text": "لم يكن ظل شخص عادي... بل هيئة تتحرك بصمت تام. [whispering]", "env": env_kind, "time": time_of_day, "mood": "shocked", "action": "alert", "prop": "exclamation", "has_shadow": True},
-        {"caption": "أشار الظل نحو السطر الأخير... وكأنه يخبرني بما سيحدث.", "speech_text": "أشار الظل نحو السطر الأخير... وكأنه يخبرني بما سيحدث.", "env": env_kind, "time": time_of_day, "mood": "surprised", "action": "point", "prop": "none", "has_shadow": True},
-        {"caption": "قرأت الاسم المكتوب... فإذا هو اسمي أنا!", "speech_text": "قرأت الاسم المكتوب... فإذا هو اسمي أنا! [gasping]", "env": env_kind, "time": time_of_day, "mood": "shocked", "action": "alert", "prop": "exclamation", "has_shadow": False},
-        {"caption": "تنفست بعمق... وحاولت إقناع نفسي بأنها مجرد صدفة.", "speech_text": "تنفست بعمق... وحاولت إقناع نفسي بأنها مجرد صدفة. [sighing]", "env": env_kind, "time": time_of_day, "mood": "curious", "action": "walk", "prop": "speech", "has_shadow": False},
-        {"caption": "لكن الباب أغلق من تلقاء نفسه... وانطفأ كل شيء!", "speech_text": "لكن الباب أغلق من تلقاء نفسه... وانطفأ كل شيء! [surprised]", "env": env_kind, "time": "fog", "mood": "shocked", "action": "alert", "prop": "exclamation", "has_shadow": True},
-        {"caption": "سمعت همساً قريباً جداً... يقول: لا تلتفت للخلف.", "speech_text": "سمعت همساً قريباً جداً... يقول: لا تلتفت للخلف. [whispering]", "env": env_kind, "time": "fog", "mood": "shocked", "action": "alert", "prop": "speech", "has_shadow": True},
-        {"caption": "وعندما نظرت إلى الورقة مجدداً... كانت السطور قد تغيرت!", "speech_text": "وعندما نظرت إلى الورقة مجدداً... كانت السطور قد تغيرت! [surprised]", "env": env_kind, "time": "night", "mood": "shocked", "action": "point", "prop": "exclamation", "has_shadow": False},
-        {"caption": "أدركت أنني لم أكن زائراً... بل كنت جزءاً من الملف!", "speech_text": "أدركت أنني لم أكن زائراً... بل كنت جزءاً من الملف! [sighing]", "env": env_kind, "time": "night", "mood": "surprised", "action": "alert", "prop": "none", "has_shadow": True},
+        {"caption": "في منتصف الليل، دخلت غرفة الأرشيف القديمة، والهدوء يعم المكان.", "speech_text": "في منتصف الليل، دخلت غرفة الأرشيف القديمة، والهدوء يعم المكان.", "env": env_kind, "time": time_of_day, "mood": "neutral", "action": "walk", "prop": "none", "has_shadow": False},
+        {"caption": "كانت المصابيح منطفئة، لكن ضوءاً خافتاً ظهر من خلف المكتب الخشبي.", "speech_text": "كانت المصابيح منطفئة، لكن ضوءاً خافتاً ظهر من خلف المكتب الخشبي... [whispering]", "env": env_kind, "time": time_of_day, "mood": "curious", "action": "point", "prop": "idea", "has_shadow": False},
+        {"caption": "اقتربت ببطء، فسمعت صوت نقر خفيف يشبه آلة كاتبة قديمة.", "speech_text": "اقتربت ببطء، فسمعت صوت نقر خفيف، يشبه آلة كاتبة قديمة.", "env": env_kind, "time": time_of_day, "mood": "surprised", "action": "alert", "prop": "exclamation", "has_shadow": False},
+        {"caption": "لم يكن في الغرفة أحد، ومع ذلك، كانت الحروف تطبع نفسها بهدوء.", "speech_text": "لم يكن في الغرفة أحد، ومع ذلك، كانت الحروف تطبع نفسها بهدوء... [nervous]", "env": env_kind, "time": time_of_day, "mood": "curious", "action": "point", "prop": "none", "has_shadow": False},
+        {"caption": "توقفت عند الطاولة، وقرأت سطراً يصف خطواتي داخل الغرفة.", "speech_text": "توقفت عند الطاولة، وقرأت سطراً، يصف خطواتي داخل الغرفة.", "env": env_kind, "time": time_of_day, "mood": "surprised", "action": "point", "prop": "idea", "has_shadow": False},
+        {"caption": "توقف نفسي فجأة، حين رأيت ظلاً يتحرك على الجدار المقابل.", "speech_text": "توقف نفسي فجأة، حين رأيت ظلاً، يتحرك على الجدار المقابل... [gasping]", "env": env_kind, "time": time_of_day, "mood": "shocked", "action": "alert", "prop": "exclamation", "has_shadow": True},
+        {"caption": "كان الظل يقف عند الباب، دون أن يصدر أي صوت خطوات.", "speech_text": "كان الظل يقف عند الباب، دون أن يصدر، أي صوت خطوات. [whispering]", "env": env_kind, "time": time_of_day, "mood": "shocked", "action": "alert", "prop": "exclamation", "has_shadow": True},
+        {"caption": "أشار الظل نحو السطر الأخير، ثم تراجع خطوة إلى الظلام.", "speech_text": "أشار الظل نحو السطر الأخير، ثم تراجع خطوة، إلى الظلام.", "env": env_kind, "time": time_of_day, "mood": "surprised", "action": "point", "prop": "none", "has_shadow": True},
+        {"caption": "اقتربت لأقرأ ما كُتب، فوجدت اسمي مكتوباً بوضوح.", "speech_text": "اقتربت لأقرأ ما كُتب، فوجدت اسمي، مكتوباً بوضوح... [gasping]", "env": env_kind, "time": time_of_day, "mood": "shocked", "action": "alert", "prop": "exclamation", "has_shadow": False},
+        {"caption": "أخذت نفساً طويلاً، وحاولت فهم سبب وجود اسمي في هذا الملف.", "speech_text": "أخذت نفساً طويلاً، وحاولت فهم سبب وجود اسمي، في هذا الملف. [sighing]", "env": env_kind, "time": time_of_day, "mood": "curious", "action": "walk", "prop": "speech", "has_shadow": False},
+        {"caption": "في تلك اللحظة، انطفأ ضوء النافذة، وخيم صمت ثقيل على المكان.", "speech_text": "في تلك اللحظة، انطفأ ضوء النافذة، وخيم صمت ثقيل، على المكان.", "env": env_kind, "time": "fog", "mood": "shocked", "action": "alert", "prop": "exclamation", "has_shadow": True},
+        {"caption": "سمعت همساً خافتاً خلف أذني، يقول إن الباب أُغلق من الخارج.", "speech_text": "سمعت همساً خافتاً خلف أذني، يقول إن الباب، أُغلق من الخارج... [whispering]", "env": env_kind, "time": "fog", "mood": "shocked", "action": "alert", "prop": "speech", "has_shadow": True},
+        {"caption": "عدت إلى الورقة مرة أخرى، فوجدت السطر الأخير قد اختفى.", "speech_text": "عدت إلى الورقة مرة أخرى، فوجدت السطر الأخير، قد اختفى.", "env": env_kind, "time": "night", "mood": "shocked", "action": "point", "prop": "exclamation", "has_shadow": False},
+        {"caption": "أدركت حينها، أن القصة لم تبدأ اليوم، بل كانت تنتظر وصولي.", "speech_text": "أدركت حينها، أن القصة لم تبدأ اليوم، بل كانت تنتظر وصولي... [sighing]", "env": env_kind, "time": "night", "mood": "surprised", "action": "alert", "prop": "none", "has_shadow": True},
     ]
     return {
-        "title": f"ملف سري #{idx} [{run_id}]: سر {place_ar}",
-        "description": f"قصة غموض مترابطة من سلسلة ملفات سرية داخل {place_ar}. تابع التفاصيل حتى النهاية.",
-        "keywords": ["ملفات سرية", "pixel art", "قصص غموض", "شورتس", "قصة جديدة"],
-        "hashtags": ["#shorts", "#pixelart", "#ملفات_سرية", "#غموض", "#قصص"],
+        "title": f"سر الأرشيف #{idx}{run_id} 🕯️👁️ #shorts #غموض",
+        "hook_questions": [
+            "كيف كُتب اسمي داخل غرفة الأرشيف المغلقة؟",
+            "ماذا حدث عندما انطفأ الضوء في اللحظة الأخيرة؟",
+        ],
+        "video_points": [
+            "الدخول إلى غرفة الأرشيف ليلاً وسماع نقر غامض",
+            "قراءة سطور تصف الأحداث قبل وقوعها وظهور الظل",
+            "اكتشاف اختفاء السطر الأخير وفهم حقيقة الملف",
+        ],
+        "viral_keywords": ["ملفات سرية", "غموض", "بيكسل آرت", "قصة غامضة", "أرشيف الليل", "شورتس"],
+        "description_hashtags": build_large_description_hashtags(["#shorts", "#pixelart", "#غموض"], max_tags=500),
         "thumbnail_text": "ملف سري",
         "beats": beats,
     }
@@ -364,30 +492,37 @@ def generate_unique_story_payload(slot: int, history: list[dict]) -> dict:
     for attempt in range(4):
         nonce = uuid.uuid4().hex[:8]
         prompt = f"""
-ابتكر قصة غموض عربية مترابطة ومشوقة لقناة يوتيوب شورتس ("ملفات سرية") بإملاء عربي فصيح سليم جداً.
+ابتكر قصة غموض عربية واحدة متماسكة ومترابطة من البداية إلى النهاية لقناة يوتيوب شورتس بإملاء عربي فصيح وصياغة طبيعية سليمة جداً.
 معرف الجلسة: {nonce} | المحاولة: {attempt + 1} | التاريخ: {now_utc.strftime("%Y-%m-%d %H:%M")} UTC | الفترة: #{slot}.
 
-أسلوب الإلقاء المطلوب:
-- سرد قصصي بشري هادئ ومشوّق (ليس غناءً وليس قراءة آلية سريعة بلا وقفات).
-- استخدم علامات الترقيم الطبيعية بوضوح مثل (...) للتوقف والترقب، و(،) و(!) و(؟) لتنظيم التنفس والوقفات.
-- أضف وسوم تعبير صوتي دقيقة داخل "speech_text" عند الحاجة فقط مثل: [whispering], [sighing], [surprised], [gasping], [nervous], [laughing].
-- لا تضع أي رموز غريبة مثل (*) أو (`) أو علامات عشوائية.
-- اجعل "caption" نصاً عربياً صافياً بدون وسوم [...] أو <...>.
+شروط الترابط واللغة والصوت:
+1. قصة واحدة متصلة في نفس المكان والحدث؛ كل جملة تكمل الجملة السابقة منطقياً ولا تقفز فجأة إلى مكان أو فكرة بلا تمهيد.
+2. تجنب الكلمات الركيكة أو غير المألوفة؛ اكتب بلغة عربية واضحة ومؤثرة.
+3. نبرة السرد يجب أن تكون هادئة وغامضة وموزونة (ليست فرحة ولا صاخبة ولا حماسية مبالغاً فيها).
+4. أكثر من الفواصل (،) وعلامات التوقف الطبيعية (...) داخل الجمل وعند المواضع التي يحتاج فيها القارئ إلى وقفة أو تنفس ليبدو الإلقاء طبيعياً وإنسانياً دون الاعتماد على علامات التعجب فقط.
+5. في "speech_text" استخدم فقط وسوم هادئة أو غامضة عند الحاجة مثل [whispering] أو [sighing] أو [nervous] (ولا تستخدم [laughing] أو [excited]).
+6. اجعل "caption" نصاً عربياً صافياً بدون أي وسوم [...] أو <...>.
+7. "title": عنوان قصير جذاب (3 إلى 5 كلمات) مع إيموجيين اثنين، ويحتوي في نهايته على من هاشتاج واحد إلى 3 هاشتاجات فقط.
+8. "hook_questions": سؤالان أو ثلاثة أسئلة مشوقة.
+9. "video_points": 3 إلى 4 نقاط تلخص أحداث الفيديو.
+10. "viral_keywords": 5 إلى 8 كلمات فيروسية.
+11. "description_hashtags": قائمة غنية بالهاشتاغات المتنوعة (حتى 500 هاشتاج للقسم الخامس من الوصف).
 
 ممنوع تكرار هذه العناوين أو الأفكار السابقة:
 {avoid_block}
 
 أعد النتيجة بصيغة JSON فقط بهذا الشكل:
 {{
-  "title": "عنوان مشوق بإملاء سليم",
-  "description": "وصف مشوق من جملتين باللغة العربية بإملاء سليم",
-  "keywords": ["ملفات سرية", "pixel art", "قصص غموض", "شورتس", "قصة جديدة"],
-  "hashtags": ["#shorts", "#pixelart", "#ملفات_سرية", "#غموض", "#قصص"],
+  "title": "عنوان قصير جذاب 🕯️👁️ #shorts #غموض",
+  "hook_questions": ["سؤال مشوق؟", "سؤال آخر؟"],
+  "video_points": ["نقطة 1", "نقطة 2", "نقطة 3"],
+  "viral_keywords": ["ملفات سرية", "غموض", "بيكسل آرت", "قصة غامضة", "شورتس"],
+  "description_hashtags": ["#shorts", "#pixelart", "#غموض", "#قصص_غموض", "#ملفات_سرية"],
   "thumbnail_text": "كلمتان",
   "beats": [
     {{
-      "caption": "جملة قصيرة واضحة بإملاء صحيح من 6 إلى 11 كلمة مع علامات ترقيم",
-      "speech_text": "نفس الجملة مع علامات الترقيم ووسم صوتي مناسب عند الحاجة",
+      "caption": "جملة مترابطة فيها فواصل طبيعية مثل: في بداية الليل، دخلت المكان، وكان كل شيء هادئاً.",
+      "speech_text": "نفس الجملة مع فواصل وعلامات توقف ووسم هادئ عند الحاجة",
       "env": "library",
       "time": "night",
       "mood": "neutral",
@@ -399,7 +534,7 @@ def generate_unique_story_payload(slot: int, history: list[dict]) -> dict:
 }}
 
 القواعد الصارمة:
-- عدد المقاطع (beats) يجب أن يكون 13 إلى 15 مقطعاً مترابطاً من البداية إلى النهاية.
+- عدد المقاطع (beats) يجب أن يكون 13 إلى 15 مقطعاً مترابطاً.
 - "env": اختر من ["lighthouse", "forest", "tunnel", "library", "ship", "basement", "alley", "corridor", "room", "street"].
 - "time": اختر من ["night", "fog", "dusk", "day"].
 - "mood": اختر من ["neutral", "surprised", "shocked", "happy", "curious"].
@@ -417,18 +552,41 @@ def generate_unique_story_payload(slot: int, history: list[dict]) -> dict:
 
 
 def build_formatted_description(payload: dict) -> str:
-    desc = fix_arabic_spelling(payload.get("description", ""))
-    keywords = payload.get("keywords", [])
-    hashtags = payload.get("hashtags", [])
-    kw_text = ", ".join([fix_arabic_spelling(k) for k in keywords if fix_arabic_spelling(k)])
-    tags_text = " ".join(
-        [
-            t if str(t).strip().startswith("#") else f"#{fix_arabic_spelling(t).replace(' ', '_')}"
-            for t in hashtags
-            if fix_arabic_spelling(t)
-        ]
+    section_1_title = fix_arabic_spelling(strip_emotes_for_caption(payload.get("title", "")))
+
+    points = [fix_arabic_spelling(strip_emotes_for_caption(p)) for p in (payload.get("video_points") or []) if fix_arabic_spelling(p)]
+    section_2_points = "\n".join(f"• {p}" for p in points)
+
+    questions = [fix_arabic_spelling(strip_emotes_for_caption(q)) for q in (payload.get("hook_questions") or []) if fix_arabic_spelling(q)]
+    section_3_questions = "\n".join(f"؟ {q.lstrip('؟?')}" for q in questions)
+
+    keywords = [fix_arabic_spelling(strip_emotes_for_caption(k)) for k in (payload.get("viral_keywords") or []) if fix_arabic_spelling(k)]
+    section_4_keywords = " • ".join(keywords)
+
+    all_tags = build_large_description_hashtags(
+        payload.get("description_hashtags") or payload.get("hashtags") or [],
+        extra_keywords=keywords,
+        max_tags=500,
     )
-    return f"{desc}\n\nالكلمات المفتاحية:\n{kw_text}\n\n{tags_text}".strip()
+
+    header_part = (
+        f"1. عنوان المقطع:\n{section_1_title}\n\n"
+        f"2. نقاط الفيديو:\n{section_2_points}\n\n"
+        f"3. أسئلة تجذب الانتباه:\n{section_3_questions}\n\n"
+        f"4. كلمات فيروسية:\n{section_4_keywords}\n\n"
+        f"5. الهاشتاغات:\n"
+    )
+    remaining_chars = max(200, 4880 - len(header_part))
+    tags_chunks: list[str] = []
+    used_len = 0
+    for tag in all_tags:
+        add_len = len(tag) + 1
+        if used_len + add_len > remaining_chars:
+            break
+        tags_chunks.append(tag)
+        used_len += add_len
+
+    return (header_part + " ".join(tags_chunks)).strip()[:4900]
 
 
 def px_rect(draw: ImageDraw.ImageDraw, x0: int, y0: int, x1: int, y1: int, fill, outline=None) -> None:
@@ -447,7 +605,6 @@ def draw_dynamic_scene(draw: ImageDraw.ImageDraw, env: str, time_of_day: str, fr
     else:
         sky_top, sky_bot, wall_c, floor_c = (24, 28, 56), (44, 46, 82), (76, 68, 98), (54, 48, 72)
 
-    # سماء متدرجة بيكسلية مع طبقات سحب ونجوم
     for y in range(0, 56, 4):
         t = y / 56.0
         col = (
@@ -466,20 +623,17 @@ def draw_dynamic_scene(draw: ImageDraw.ImageDraw, env: str, time_of_day: str, fr
             twinkle = (245, 248, 255) if ((i + frame_idx) % 4 != 0) else (150, 165, 210)
             px_rect(draw, sx, sy, sx + 1, sy + 1, twinkle)
 
-    # طبقات سحب بيكسلية متحركة بطيئة
     cloud_shift = (frame_idx // 2) % 24
     for cx in range(-16 + cloud_shift, GRID_W + 16, 36):
         cy = 18 + (abs(cx) % 10)
         px_rect(draw, cx, cy + 2, cx + 14, cy + 6, (186, 192, 218))
         px_rect(draw, cx + 3, cy, cx + 10, cy + 5, (214, 218, 236))
 
-    # جدار خلفي بتفاصيل معمارية وأرضية ذات عمق
     px_rect(draw, 0, 56, GRID_W - 1, 148, wall_c)
     for wy in range(60, 146, 8):
         shade = (max(0, wall_c[0] - 10), max(0, wall_c[1] - 10), max(0, wall_c[2] - 10))
         px_rect(draw, 0, wy, GRID_W - 1, wy, shade)
 
-    # نافذة بإطار وعتبة وزجاج
     win_x, win_y = 82, 66
     px_rect(draw, win_x, win_y, win_x + 24, win_y + 26, (44, 38, 58), outline=(20, 18, 28))
     px_rect(draw, win_x + 2, win_y + 2, win_x + 11, win_y + 12, (62, 78, 122))
@@ -489,7 +643,6 @@ def draw_dynamic_scene(draw: ImageDraw.ImageDraw, env: str, time_of_day: str, fr
     px_rect(draw, win_x - 1, win_y + 26, win_x + 25, win_y + 28, (112, 86, 68), outline=(22, 18, 26))
 
     if env == "library":
-        # خزائن كتب بتفاصيل رفوف وأغلفة ملونة وآلة قديمة على مكتب
         for sx in range(8, 72, 22):
             px_rect(draw, sx, 64, sx + 18, 146, (68, 44, 30), outline=(24, 16, 12))
             for ry in range(72, 140, 14):
@@ -511,7 +664,6 @@ def draw_dynamic_scene(draw: ImageDraw.ImageDraw, env: str, time_of_day: str, fr
             px_rect(draw, tx - 3, 62, tx + 13, 88, (38, 104, 62), outline=(18, 34, 24))
             px_rect(draw, tx, 50, tx + 10, 66, (52, 126, 74))
 
-    # أرضية بخطوط أفقية لإعطاء عمق ومنظور
     px_rect(draw, 0, 148, GRID_W - 1, GRID_H - 1, floor_c)
     for fy in range(152, GRID_H, 10):
         line_c = (max(0, floor_c[0] - 12), max(0, floor_c[1] - 12), max(0, floor_c[2] - 12))
@@ -540,7 +692,6 @@ def draw_character(
         shirt_c = (22, 22, 36)
         pants_c = (18, 18, 30)
         eye_c = (145, 165, 240)
-        # ظل أرضي بيضاوي تحت الشخصية
         px_rect(draw, cx - 8, cy + 5, cx + 8, cy + 7, (14, 14, 24))
     else:
         hair_c = (38, 34, 48)
@@ -550,14 +701,12 @@ def draw_character(
         eye_c = (20, 20, 28)
         px_rect(draw, cx - 8, cy + 5, cx + 8, cy + 7, (24, 22, 34))
 
-    # الرأس والشعر والأذنان
     px_rect(draw, cx - 7, cy - 34, cx + 7, cy - 18, skin_c, outline=outline)
     px_rect(draw, cx - 8, cy - 28, cx - 7, cy - 24, skin_c, outline=outline)
     px_rect(draw, cx + 7, cy - 28, cx + 8, cy - 24, skin_c, outline=outline)
     px_rect(draw, cx - 7, cy - 36, cx + 7, cy - 28, hair_c, outline=outline)
     px_rect(draw, cx - 7, cy - 29, cx - 4, cy - 27, hair_c)
 
-    # العيون والتعابير
     if mood == "shocked":
         px_rect(draw, cx - 5, cy - 25, cx - 2, cy - 21, (255, 255, 255), outline=outline)
         px_rect(draw, cx + 2, cy - 25, cx + 5, cy - 21, (255, 255, 255), outline=outline)
@@ -577,7 +726,6 @@ def draw_character(
         px_rect(draw, cx + 2, cy - 24, cx + 4, cy - 22, eye_c)
         px_rect(draw, cx - 2, cy - 20, cx + 2, cy - 19, (92, 58, 52))
 
-    # الجذع والياقة والأكمام
     px_rect(draw, cx - 7, cy - 17, cx + 7, cy - 4, shirt_c, outline=outline)
     px_rect(draw, cx - 2, cy - 17, cx + 2, cy - 15, (238, 240, 248))
 
@@ -597,7 +745,6 @@ def draw_character(
         px_rect(draw, cx - 10, cy - 16, cx - 8, cy - 6, shirt_c, outline=outline)
         px_rect(draw, cx + 8, cy - 16, cx + 10, cy - 6, shirt_c, outline=outline)
 
-    # الأرجل وحركة المشي
     step_l = -1 if (step_phase % 2 == 0) else 1
     step_r = 1 if (step_phase % 2 == 0) else -1
     px_rect(draw, cx - 6, cy - 3, cx - 1, cy + 4 + step_l, pants_c, outline=outline)
@@ -797,7 +944,6 @@ def render_beat_frames(beat: dict, beat_idx: int, duration_sec: float, story_see
         img = apply_after_effects_polish(img, char_x, char_y, mood, f_i, num_frames, story_seed + beat_idx * 13)
         draw = ImageDraw.Draw(img)
 
-        # Auto Caption ديناميكي متزامن مع زمن المقطع
         active_words: list[str] = []
         active_idx = 0
         for sf, ef, w_list in chunks_timeline:
@@ -812,13 +958,11 @@ def render_beat_frames(beat: dict, beat_idx: int, duration_sec: float, story_see
             active_idx = len(active_words) - 1
 
         if active_words:
-            # نعرض العبارة كاملة مع تمييز الكلمة النشطة حالياً
             full_line = " ".join(active_words)
             bbox_all = draw.textbbox((0, 0), full_line, font=font_cap)
             line_h = max(bbox_all[3] - bbox_all[1], 68)
             base_y = 1430
 
-            # شريط كلمة نشطة متحرك في الأسفل لإبراز الإيقاع اللفظي
             cur_word = active_words[active_idx]
             w_box = draw.textbbox((0, 0), cur_word, font=font_cap)
             pw = (w_box[2] - w_box[0]) + 44
@@ -837,7 +981,6 @@ def render_beat_frames(beat: dict, beat_idx: int, duration_sec: float, story_see
                 stroke_width=2,
             )
 
-            # السطر الرئيسي للكابشن بحواف داكنة واضحة دون صندوق مستطيل ثقيل
             lx = (W - (bbox_all[2] - bbox_all[0])) // 2
             draw_outlined_text(
                 draw,
@@ -918,9 +1061,9 @@ def try_google_ai_studio_tts(google_script: str, audio_path: Path) -> bool:
         try:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={google_key}"
             prompt_text = (
-                f"اقرأ النص التالي باللغة العربية بأسلوب سرد قصصي طبيعي هادئ مع الوقف عند علامات الترقيم والتزام التعبيرات داخل الأقواس الزاوية مثل <laughing> و<whispering> و<sighing> دون غناء:\n\n{google_script}"
+                f"اقرأ النص التالي باللغة العربية بنبرة هادئة وغامضة ومتزنة، مع التزام الفواصل وعلامات الترقيم والتعبيرات داخل الأقواس الزاوية مثل <whispering> و<sighing> دون حماس مفرط أو غناء:\n\n{google_script}"
                 if "3.8" in model_name
-                else f"اقرأ هذه القصة بأسلوب سردي واضح ومتزن باللغة العربية دون غناء:\n\n{strip_emotes_for_caption(google_script)}"
+                else f"اقرأ هذه القصة بنبرة هادئة وغامضة وواضحة مع الوقف عند الفواصل وعلامات الترقيم دون غناء:\n\n{strip_emotes_for_caption(google_script)}"
             )
             payload = {
                 "contents": [{"parts": [{"text": prompt_text}]}],
@@ -1001,14 +1144,14 @@ async def generate_continuous_voice(beats: list[dict], audio_path: Path) -> list
     ]
     clean_lines = [strip_emotes_for_caption(line) or "ملفات سرية" for line in raw_lines]
 
-    fish_script = "  ".join(format_tts_for_provider(line, "fish") for line in raw_lines)
-    google_script = "  ".join(format_tts_for_provider(line, "google") for line in raw_lines)
-    edge_script = "  ".join(format_tts_for_provider(line, "edge") for line in raw_lines)
+    fish_script = " ... ".join(format_tts_for_provider(line, "fish") for line in raw_lines)
+    google_script = " ... ".join(format_tts_for_provider(line, "google") for line in raw_lines)
+    edge_script = " ... ".join(format_tts_for_provider(line, "edge") for line in raw_lines)
 
     if not try_fish_audio_tts(fish_script, audio_path):
         if not try_google_ai_studio_tts(google_script, audio_path):
             voice = "ar-SA-HamedNeural"
-            comm = edge_tts.Communicate(text=edge_script, voice=voice, rate="+0%")
+            comm = edge_tts.Communicate(text=edge_script, voice=voice, rate="-4%")
             with open(audio_path, "wb") as f:
                 async for chunk in comm.stream():
                     if chunk["type"] == "audio":
@@ -1166,7 +1309,7 @@ def main() -> None:
     formatted_description = build_formatted_description(payload)
     meta = {
         "slot": slot,
-        "title": fix_arabic_spelling(payload.get("title", "")),
+        "title": payload.get("title", ""),
         "description": formatted_description,
         "beats": beats,
     }
@@ -1188,7 +1331,7 @@ def main() -> None:
         thumb_path=thumb_path,
         title=str(meta["title"]),
         description=formatted_description,
-        keywords=payload.get("keywords", []),
+        keywords=payload.get("viral_keywords", []),
         privacy_status=PRIVACY_STATUS,
     )
 
