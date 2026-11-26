@@ -125,6 +125,7 @@ def main() -> None:
         "slot": slot,
         "title": payload.get("title", ""),
         "description": formatted_description,
+        "content_brief": payload.get("content_brief", {}),
         "beats": beats,
     }
     (OUT_DIR / "metadata.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
