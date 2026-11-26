@@ -51,6 +51,10 @@ jobs:
           YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
         run: python scripts/bot.py
 
+      - name: Clean temporary frames before artifact upload
+        if: always()
+        run: rm -f output/beat_*.png output/frames.txt output/google_tts_raw.bin || true
+
       - name: Upload generated short as artifact
         if: always()
         uses: actions/upload-artifact@v4
