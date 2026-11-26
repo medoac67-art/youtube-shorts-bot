@@ -12,6 +12,7 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
+from quality_engine import validate_short_package
 from story_engine import (
     build_formatted_description,
     fix_arabic_spelling,
@@ -142,6 +143,16 @@ def main() -> None:
         create_thumbnail(first_frame, str(payload.get("thumbnail_text", "ملفات سرية")), thumb_path)
 
     cleanup_temp_frames()
+
+    is_ok, issues = validate_short_package(
+        video_path=video_path,
+        audio_path=audio_path,
+        title=str(meta["title"]),
+        description=formatted_description,
+        beats=beats,
+    )
+    if not is_ok:
+        print("Quality check warnings:", "; ".join(issues))
 
     video_id = upload_to_youtube(
         video_path=video_path,
