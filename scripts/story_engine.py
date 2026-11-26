@@ -449,7 +449,7 @@ def build_unique_fallback(slot: int, history: list[dict], brief: dict | None = N
     time_of_day = ["fog", "dusk", "night", "day"][idx % 4]
 
     beats = [
-        {"caption": "في الصباح الباكر، تقدمت القافلة عبر الممر الجبلي الضيق، والضباب يلف التلال.", "speech_text": "في الصباح الباكر، تقدمت القافلة، عبر الممر الجبلي الضيق، والضباب يلف التلال.", "env": env_kind, "time": time_of_day, "mood": "neutral", "action": "walk", "prop": "none", "has_shadow": False, "scene_prompt": "detailed pixel art expedition marching along a misty rocky mountain ridge with dense clouds and dramatic lighting"},
+        {"caption": "إشارة غامضة ظهرت فجأة، ثم تقدمت البعثة عبر الممر الجبلي، والضباب يلف التلال.", "speech_text": "إشارة غامضة ظهرت فجأة... ثم تقدمت البعثة، عبر الممر الجبلي، والضباب يلف التلال. [nervous]", "env": env_kind, "time": time_of_day, "mood": "curious", "action": "walk", "prop": "exclamation", "has_shadow": False, "scene_prompt": "detailed pixel art expedition marching along a misty rocky mountain ridge with dense clouds and dramatic lighting"},
         {"caption": "كان الهواء بارداً، ومع ذلك، ظهرت آثار أقدام قديمة على الصخر الرطب.", "speech_text": "كان الهواء بارداً، ومع ذلك، ظهرت آثار أقدام قديمة، على الصخر الرطب... [nervous]", "env": env_kind, "time": time_of_day, "mood": "curious", "action": "point", "prop": "idea", "has_shadow": False, "scene_prompt": "detailed pixel art explorer examining ancient footprints on wet stone path in misty highlands"},
         {"caption": "توقف المستكشف قليلاً، ورفع المنظار نحو المنحدر المقابل.", "speech_text": "توقف المستكشف قليلاً، ورفع المنظار، نحو المنحدر المقابل.", "env": env_kind, "time": time_of_day, "mood": "curious", "action": "point", "prop": "none", "has_shadow": False, "scene_prompt": "detailed pixel art traveler looking through brass spyglass toward a towering cliff and drifting fog"},
         {"caption": "لم يكن هناك سوى صخور عالية، لكن سحابة كثيفة هبطت فجأة.", "speech_text": "لم يكن هناك سوى صخور عالية، لكن سحابة كثيفة، هبطت فجأة... [whispering]", "env": env_kind, "time": "fog", "mood": "surprised", "action": "alert", "prop": "exclamation", "has_shadow": False, "scene_prompt": "detailed pixel art thick eerie cloud descending over mountain pass engulfing distant silhouettes"},
@@ -459,7 +459,7 @@ def build_unique_fallback(slot: int, history: list[dict], brief: dict | None = N
         {"caption": "وبعد أن انقشع الضباب، كانت الأرض خالية إلا من معدات متروكة.", "speech_text": "وبعد أن انقشع الضباب، كانت الأرض خالية، إلا من معدات متروكة... [whispering]", "env": env_kind, "time": "dusk", "mood": "shocked", "action": "point", "prop": "exclamation", "has_shadow": False, "scene_prompt": "detailed pixel art empty rocky trail with abandoned expedition gear after mist clears at sunset"},
         {"caption": "سجلت التقارير الرسمية اختفاء المجموعة، دون أي دليل واضح.", "speech_text": "سجلت التقارير الرسمية اختفاء المجموعة، دون أي دليل واضح.", "env": env_kind, "time": "dusk", "mood": "curious", "action": "walk", "prop": "none", "has_shadow": False, "scene_prompt": "detailed pixel art investigator standing on overlook above quiet canyon during twilight"},
         {"caption": "ولم يُعثر على أثر لهم، حتى بعد انتهاء البحث في المنطقة.", "speech_text": "ولم يُعثر على أثر لهم، حتى بعد انتهاء البحث، في المنطقة... [sighing]", "env": env_kind, "time": "night", "mood": "surprised", "action": "alert", "prop": "none", "has_shadow": True, "scene_prompt": "detailed pixel art starry night sky over silent mountain ridge and quiet valley"},
-        {"caption": "بقي المكان شاهداً على واحدة من أغرب الوقائع التي لم تُفسَّر.", "speech_text": "بقي المكان شاهداً، على واحدة من أغرب الوقائع، التي لم تُفسَّر.", "env": env_kind, "time": "night", "mood": "curious", "action": "point", "prop": "idea", "has_shadow": True, "scene_prompt": "detailed pixel art cinematic landscape of mysterious highland pass under moonlit clouds"},
+        {"caption": "بقي المكان شاهداً على واحدة من أغرب الوقائع التي لم تُفسَّر.", "speech_text": "بقي المكان شاهداً، على واحدة من أغرب الوقائع، التي لم تُفسَّر... لو كنت مكانهم، ماذا كنت ستفعل؟", "env": env_kind, "time": "night", "mood": "curious", "action": "point", "prop": "idea", "has_shadow": True, "scene_prompt": "detailed pixel art cinematic landscape of mysterious highland pass under moonlit clouds"},
     ]
 
     return {
@@ -489,7 +489,7 @@ def generate_unique_story_payload(slot: int, history: list[dict]) -> dict:
     avoid_plots = "\n".join(f"- {s}" for s in recent_summaries) if recent_summaries else "- لا توجد حبكات سابقة"
 
     idx = len(history) + slot
-    brief = build_growth_and_content_brief(slot, recent_titles)
+    brief = build_growth_and_content_brief(slot, recent_titles, history_len=len(history))
     chosen_theme = brief.get("suggested_theme") or STORY_THEMES[idx % len(STORY_THEMES)]
     chosen_env = brief.get("suggested_env") if brief.get("suggested_env") in ALL_ENVIRONMENTS else ALL_ENVIRONMENTS[idx % len(ALL_ENVIRONMENTS)]
 
@@ -507,7 +507,7 @@ def generate_unique_story_payload(slot: int, history: list[dict]) -> dict:
 - البيئة الأساسية: {chosen_env}
 
 شروط الترابط والتنويع والصوت والرسوم:
-1. قصة واحدة متماسكة؛ كل جملة تبني على الجملة التي قبلها وتقود إلى التي بعدها في تسلسل منطقي مشوق.
+1. قصة واحدة متماسكة؛ كل جملة تبني على الجملة التي قبلها وتقود إلى التي بعدها في تسلسل منطقي مشوق، مع Hook قوي في المقطع الأول وسؤال تفاعلي يحفز التعليقات في المقطع الأخير.
 2. صياغة أصلية 100% خالية من أي نسخ أو اقتباس مباشر لحماية القناة من حقوق الطبع والنشر.
 3. نبرة السرد هادئة وواقعية وغامضة (ليست فرحة ولا حماسية مبالغاً فيها).
 4. أكثر من الفواصل (،) وعلامات التوقف الطبيعية (...) داخل الجمل وعند المواضع التي يحتاج فيها القارئ إلى وقفة أو تنفس ليبدو الإلقاء طبيعياً.
