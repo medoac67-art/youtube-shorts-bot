@@ -9,6 +9,8 @@ from pathlib import Path
 
 import requests
 
+from intel_engine import build_growth_and_content_brief
+
 DATA_DIR = Path("data")
 HISTORY_FILE = DATA_DIR / "stories_history.json"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -438,11 +440,12 @@ def call_llm_for_story(prompt: str) -> dict | None:
     return None
 
 
-def build_unique_fallback(slot: int, history: list[dict]) -> dict:
+def build_unique_fallback(slot: int, history: list[dict], brief: dict | None = None) -> dict:
     run_id = uuid.uuid4().hex[:4]
     idx = len(history) + slot
-    env_kind = ALL_ENVIRONMENTS[idx % len(ALL_ENVIRONMENTS)]
-    theme = STORY_THEMES[idx % len(STORY_THEMES)]
+    brief_env = (brief or {}).get("suggested_env", "")
+    env_kind = brief_env if brief_env in ALL_ENVIRONMENTS else ALL_ENVIRONMENTS[idx % len(ALL_ENVIRONMENTS)]
+    theme = (brief or {}).get("suggested_theme") or STORY_THEMES[idx % len(STORY_THEMES)]
     time_of_day = ["fog", "dusk", "night", "day"][idx % 4]
 
     beats = [
@@ -474,6 +477,7 @@ def build_unique_fallback(slot: int, history: list[dict]) -> dict:
         "description_hashtags": build_large_description_hashtags(["#shorts", "#pixelart", "#غموض"], max_tags=500),
         "thumbnail_text": "لغز غامض",
         "beats": beats,
+        "content_brief": brief or {},
     }
 
 
@@ -485,25 +489,31 @@ def generate_unique_story_payload(slot: int, history: list[dict]) -> dict:
     avoid_plots = "\n".join(f"- {s}" for s in recent_summaries) if recent_summaries else "- لا توجد حبكات سابقة"
 
     idx = len(history) + slot
-    chosen_theme = STORY_THEMES[idx % len(STORY_THEMES)]
-    chosen_env = ALL_ENVIRONMENTS[idx % len(ALL_ENVIRONMENTS)]
+    brief = build_growth_and_content_brief(slot, recent_titles)
+    chosen_theme = brief.get("suggested_theme") or STORY_THEMES[idx % len(STORY_THEMES)]
+    chosen_env = brief.get("suggested_env") if brief.get("suggested_env") in ALL_ENVIRONMENTS else ALL_ENVIRONMENTS[idx % len(ALL_ENVIRONMENTS)]
 
     for attempt in range(4):
         nonce = uuid.uuid4().hex[:8]
         prompt = f"""
 ابتكر قصة غموض عربية واقعية ومشوقة ومتماسكة من البداية إلى النهاية لقناة يوتيوب شورتس بإملاء عربي فصيح وصياغة طبيعية سليمة جداً.
 معرف الجلسة: {nonce} | المحاولة: {attempt + 1} | التاريخ: {now_utc.strftime("%Y-%m-%d %H:%M")} UTC | الفترة: #{slot}.
-الفكرة المقترحة لهذه الحلقة: {chosen_theme}
-البيئة الأساسية المقترحة: {chosen_env} (يمكن تنويعها حسب تسلسل الأحداث).
+
+ملخص الذكاء والمحتوى لهذه الحلقة:
+- الفكرة الأصلية: {chosen_theme}
+- زاوية مستوحاة من الترند/الأخبار الحالية: {brief.get("inspired_trend_angle", "")}
+- نمط الجذب المستوحى من المنافسين (بدون أي نسخ حرفي أو مخالفة حقوق طبع): {brief.get("competitor_hook_pattern", "")}
+- تكتيك النمو وزيادة المشاهدات والتفاعل (اللايك والتعليقات والاشتراك): {brief.get("growth_tactic", "")}
+- البيئة الأساسية: {chosen_env}
 
 شروط الترابط والتنويع والصوت والرسوم:
 1. قصة واحدة متماسكة؛ كل جملة تبني على الجملة التي قبلها وتقود إلى التي بعدها في تسلسل منطقي مشوق.
-2. تجنب تكرار القصص أو الأماكن السابقة؛ اجعل الأحداث والشخصيات والمكان مختلفين بوضوح عن القصص السابقة.
+2. صياغة أصلية 100% خالية من أي نسخ أو اقتباس مباشر لحماية القناة من حقوق الطبع والنشر.
 3. نبرة السرد هادئة وواقعية وغامضة (ليست فرحة ولا حماسية مبالغاً فيها).
 4. أكثر من الفواصل (،) وعلامات التوقف الطبيعية (...) داخل الجمل وعند المواضع التي يحتاج فيها القارئ إلى وقفة أو تنفس ليبدو الإلقاء طبيعياً.
 5. في "speech_text" استخدم فقط وسوم هادئة أو غامضة عند الحاجة مثل [whispering] أو [sighing] أو [nervous] (ولا تستخدم [laughing] أو [excited]).
 6. اجعل "caption" نصاً عربياً صافياً بدون أي وسوم [...] أو <...>.
-7. أضف لكل مقطع "scene_prompt" بالإنجليزية يصف مشهداً بيكسلياً واقعياً غنياً بالتفاصيل (detailed pixel art scene, rich lighting, realistic environment and characters, vertical composition).
+7. أضف لكل مقطع "scene_prompt" بالإنجليزية يصف مشهداً بيكسلياً واقعياً غنياً بالتفاصيل.
 8. "title": عنوان قصير جذاب (3 إلى 5 كلمات) مع إيموجيين اثنين، ويحتوي في نهايته على من هاشتاج واحد إلى 3 هاشتاجات فقط.
 9. "hook_questions": سؤالان أو ثلاثة أسئلة مشوقة.
 10. "video_points": 3 إلى 4 نقاط تلخص أحداث الفيديو.
@@ -548,11 +558,12 @@ def generate_unique_story_payload(slot: int, history: list[dict]) -> dict:
         data = call_llm_for_story(prompt)
         if data and isinstance(data.get("beats"), list) and len(data["beats"]) >= 12:
             data["beats"] = data["beats"][:15]
+            data["content_brief"] = brief
             polished = polish_arabic_payload(data)
             if not is_duplicate_story(polished, history):
                 return polished
 
-    return polish_arabic_payload(build_unique_fallback(slot, history))
+    return polish_arabic_payload(build_unique_fallback(slot, history, brief=brief))
 
 
 def build_formatted_description(payload: dict) -> str:
