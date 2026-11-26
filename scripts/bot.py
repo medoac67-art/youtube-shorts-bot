@@ -28,8 +28,8 @@ OUT_DIR.mkdir(parents=True, exist_ok=True)
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 W, H = 1080, 1920
-GRID_W, GRID_H = 72, 128
-PX = 15
+GRID_W, GRID_H = 120, 213
+PX = 9
 PRIVACY_STATUS = "public"
 
 DEFAULT_FISH_KEYS = [
@@ -104,17 +104,19 @@ def normalize_emote_name(raw_tag: str) -> str:
 
 def normalize_brackets_in_speech_text(text: str) -> str:
     s = str(text or "").replace("［", "[").replace("］", "]")
+    s = re.sub(r"[*_~`]+", " ", s)
 
     def _repl(m: re.Match) -> str:
         inner = m.group(1).strip().lower()
         norm = normalize_emote_name(inner)
         if norm:
             return f" [{norm}] "
-        cleaned_inner = re.sub(r"[^a-zA-Z0-9\s]", "", inner).strip()
-        return f" [{cleaned_inner}] " if cleaned_inner else " "
+        return " "
 
     s = re.sub(r"\[([^\[\]]+)\]", _repl, s)
-    return re.sub(r"\s+", " ", s).strip()
+    s = re.sub(r"<[^<>]+>", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
 
 
 def format_tts_for_provider(text: str, provider: str) -> str:
@@ -131,6 +133,7 @@ def strip_emotes_for_caption(text: str) -> str:
     s = str(text or "").replace("［", "[").replace("］", "]")
     s = re.sub(r"\[[^\[\]]*\]", "", s)
     s = re.sub(r"<[^<>]*>", "", s)
+    s = re.sub(r"[*_~`]+", "", s)
     return re.sub(r"\s+", " ", s).strip()
 
 
@@ -204,12 +207,14 @@ def polish_arabic_payload(payload: dict) -> dict:
     beats_in = payload.get("beats", [])
 
     for b in beats_in:
-        raw_cap = str(b.get("caption", ""))
-        b["speech_text"] = normalize_brackets_in_speech_text(fix_arabic_spelling(raw_cap))
+        raw_speech = str(b.get("speech_text") or b.get("caption") or "")
+        b["speech_text"] = normalize_brackets_in_speech_text(fix_arabic_spelling(raw_speech))
+        raw_cap = str(b.get("caption") or strip_emotes_for_caption(raw_speech))
         b["caption"] = fix_arabic_spelling(strip_emotes_for_caption(raw_cap))
 
     review_prompt = f"""
 راجع النصوص العربية التالية وصحح جميع الأخطاء الإملائية والنحوية وعلامات الترقيم دون تغيير المعنى أو عدد المقاطع ({len(beats_in)} مقطعاً).
+اجعل أسلوب الإلقاء طبيعياً مع علامات ترقيم واضحة (مثل ... و ، و ؟ و !) دون غناء أو مبالغة لفظية.
 أعد النتيجة بصيغة JSON فقط بنفس المفاتيح:
 {{
   "title": "...",
@@ -322,31 +327,31 @@ def call_llm_for_story(prompt: str) -> dict | None:
 def build_unique_fallback(slot: int, history: list[dict]) -> dict:
     run_id = uuid.uuid4().hex[:6]
     idx = len(history) + slot
-    place_ar = "المنارة الساحلية القديمة"
-    env_kind = "lighthouse"
+    place_ar = "غرفة الأرشيف القديمة"
+    env_kind = "library"
     time_of_day = "night"
     beats = [
-        {"caption": "عند منتصف الليل اقترب المحقق من المنارة الساحلية القديمة والبحر يضرب الصخور.", "speech_text": "عند منتصف الليل اقترب المحقق من المنارة الساحلية القديمة والبحر يضرب الصخور.", "env": env_kind, "time": time_of_day, "mood": "neutral", "action": "walk", "prop": "none", "has_shadow": False},
-        {"caption": "كانت المنارة مطفأة منذ سنوات طويلة، لكن ضوءاً خافتاً ظهر في نافذتها العليا.", "speech_text": "كانت المنارة مطفأة منذ سنوات طويلة، لكن ضوءاً خافتاً ظهر في نافذتها العليا. [whispering]", "env": env_kind, "time": time_of_day, "mood": "curious", "action": "point", "prop": "idea", "has_shadow": False},
-        {"caption": "دفع الباب الخشبي الثقيل فصدر صرير حاد تردد داخل البناء الفارغ.", "speech_text": "دفع الباب الخشبي الثقيل فصدر صرير حاد تردد داخل البناء الفارغ. [surprised]", "env": env_kind, "time": time_of_day, "mood": "surprised", "action": "alert", "prop": "exclamation", "has_shadow": False},
-        {"caption": "أشعل مصباحه اليدوي وبدأ يصعد الدرج الحجري الملتف خطوة بعد خطوة.", "speech_text": "أشعل مصباحه اليدوي وبدأ يصعد الدرج الحجري الملتف خطوة بعد خطوة.", "env": env_kind, "time": time_of_day, "mood": "curious", "action": "walk", "prop": "none", "has_shadow": False},
-        {"caption": "على الجدار الحجري الرطب وجد آثار أقدام حديثة تتجه نحو الأعلى.", "speech_text": "على الجدار الحجري الرطب وجد آثار أقدام حديثة تتجه نحو الأعلى.", "env": env_kind, "time": time_of_day, "mood": "surprised", "action": "point", "prop": "idea", "has_shadow": False},
-        {"caption": "توقف فجأة عندما شعر بأن أحداً يقف خلفه في الظلام.", "speech_text": "توقف فجأة عندما شعر بأن أحداً يقف خلفه في الظلام. [gasping]", "env": env_kind, "time": time_of_day, "mood": "shocked", "action": "alert", "prop": "exclamation", "has_shadow": True},
-        {"caption": "استدار بسرعة فلم يجد أحداً، لكن ضحكة خافتة ترددت في المكان.", "speech_text": "استدار بسرعة فلم يجد أحداً، لكن ضحكة خافتة ترددت في المكان. [laughing]", "env": env_kind, "time": time_of_day, "mood": "shocked", "action": "alert", "prop": "exclamation", "has_shadow": True},
-        {"caption": "اقترب الخيال ببطء ثم أشار نحو صندوق معدني قديم في الزاوية.", "speech_text": "اقترب الخيال ببطء ثم أشار نحو صندوق معدني قديم في الزاوية.", "env": env_kind, "time": time_of_day, "mood": "surprised", "action": "point", "prop": "none", "has_shadow": True},
-        {"caption": "فتح المحقق الصندوق فوجد دفتراً قديماً يحمل تاريخ آخر ليلة عملت فيها المنارة.", "speech_text": "فتح المحقق الصندوق فوجد دفتراً قديماً يحمل تاريخ آخر ليلة عملت فيها المنارة.", "env": env_kind, "time": time_of_day, "mood": "curious", "action": "point", "prop": "speech", "has_shadow": False},
-        {"caption": "كانت الصفحات الأخيرة تحذر من أن الضوء لا ينطفئ بل يختبئ.", "speech_text": "كانت الصفحات الأخيرة تحذر من أن الضوء لا ينطفئ بل يختبئ. [sighing]", "env": env_kind, "time": time_of_day, "mood": "shocked", "action": "alert", "prop": "exclamation", "has_shadow": False},
-        {"caption": "وفجأة انطفأ المصباح اليدوي في يده وأصبح المكان غارقاً في العتمة.", "speech_text": "وفجأة انطفأ المصباح اليدوي في يده وأصبح المكان غارقاً في العتمة. [surprised]", "env": env_kind, "time": time_of_day, "mood": "shocked", "action": "alert", "prop": "exclamation", "has_shadow": True},
-        {"caption": "سمع صوت همس خافت يطلب منه ألا ينظر نحو البحر.", "speech_text": "سمع صوت همس خافت يطلب منه ألا ينظر نحو البحر. [whispering]", "env": env_kind, "time": time_of_day, "mood": "shocked", "action": "alert", "prop": "speech", "has_shadow": True},
-        {"caption": "رفع رأسه نحو النافذة ليرى سفينة قديمة تتحرك بلا أضواء وسط الضباب.", "speech_text": "رفع رأسه نحو النافذة ليرى سفينة قديمة تتحرك بلا أضواء وسط الضباب.", "env": env_kind, "time": "fog", "mood": "shocked", "action": "point", "prop": "exclamation", "has_shadow": False},
-        {"caption": "وعندما عاد لينظر إلى الدفتر كانت الصفحة الأخيرة قد اختفت تماماً.", "speech_text": "وعندما عاد لينظر إلى الدفتر كانت الصفحة الأخيرة قد اختفت تماماً. [sighing]", "env": env_kind, "time": "night", "mood": "surprised", "action": "alert", "prop": "none", "has_shadow": True},
+        {"caption": "في منتصف الليل... دخلت غرفة الأرشيف القديمة.", "speech_text": "في منتصف الليل... دخلت غرفة الأرشيف القديمة.", "env": env_kind, "time": time_of_day, "mood": "neutral", "action": "walk", "prop": "none", "has_shadow": False},
+        {"caption": "كانت المصابيح منطفئة، إلا ضوءاً خافتاً ينبعث من خلف الخزانة!", "speech_text": "كانت المصابيح منطفئة... إلا ضوءاً خافتاً ينبعث من خلف الخزانة! [whispering]", "env": env_kind, "time": time_of_day, "mood": "curious", "action": "point", "prop": "idea", "has_shadow": False},
+        {"caption": "اقتربت ببطء... وسمعت صوت نقر منتظم كأنه آلة كاتبة.", "speech_text": "اقتربت ببطء... وسمعت صوت نقر منتظم، كأنه آلة كاتبة.", "env": env_kind, "time": time_of_day, "mood": "surprised", "action": "alert", "prop": "exclamation", "has_shadow": False},
+        {"caption": "كيف تعمل آلة قديمة... والمكان مهجور منذ سنوات؟", "speech_text": "كيف تعمل آلة قديمة... والمكان مهجور منذ سنوات؟ [nervous]", "env": env_kind, "time": time_of_day, "mood": "curious", "action": "point", "prop": "none", "has_shadow": False},
+        {"caption": "أزحت الستار القماشي... فوجدت أوراقاً مكتوبة بتاريخ الغد!", "speech_text": "أزحت الستار القماشي... فوجدت أوراقاً مكتوبة بتاريخ الغد! [surprised]", "env": env_kind, "time": time_of_day, "mood": "surprised", "action": "point", "prop": "idea", "has_shadow": False},
+        {"caption": "توقف قلبي فجأة... حين لمحت ظلاً يقف عند الباب!", "speech_text": "توقف قلبي فجأة... حين لمحت ظلاً يقف عند الباب! [gasping]", "env": env_kind, "time": time_of_day, "mood": "shocked", "action": "alert", "prop": "exclamation", "has_shadow": True},
+        {"caption": "لم يكن ظل شخص عادي... بل هيئة تتحرك بصمت تام.", "speech_text": "لم يكن ظل شخص عادي... بل هيئة تتحرك بصمت تام. [whispering]", "env": env_kind, "time": time_of_day, "mood": "shocked", "action": "alert", "prop": "exclamation", "has_shadow": True},
+        {"caption": "أشار الظل نحو السطر الأخير... وكأنه يخبرني بما سيحدث.", "speech_text": "أشار الظل نحو السطر الأخير... وكأنه يخبرني بما سيحدث.", "env": env_kind, "time": time_of_day, "mood": "surprised", "action": "point", "prop": "none", "has_shadow": True},
+        {"caption": "قرأت الاسم المكتوب... فإذا هو اسمي أنا!", "speech_text": "قرأت الاسم المكتوب... فإذا هو اسمي أنا! [gasping]", "env": env_kind, "time": time_of_day, "mood": "shocked", "action": "alert", "prop": "exclamation", "has_shadow": False},
+        {"caption": "تنفست بعمق... وحاولت إقناع نفسي بأنها مجرد صدفة.", "speech_text": "تنفست بعمق... وحاولت إقناع نفسي بأنها مجرد صدفة. [sighing]", "env": env_kind, "time": time_of_day, "mood": "curious", "action": "walk", "prop": "speech", "has_shadow": False},
+        {"caption": "لكن الباب أغلق من تلقاء نفسه... وانطفأ كل شيء!", "speech_text": "لكن الباب أغلق من تلقاء نفسه... وانطفأ كل شيء! [surprised]", "env": env_kind, "time": "fog", "mood": "shocked", "action": "alert", "prop": "exclamation", "has_shadow": True},
+        {"caption": "سمعت همساً قريباً جداً... يقول: لا تلتفت للخلف.", "speech_text": "سمعت همساً قريباً جداً... يقول: لا تلتفت للخلف. [whispering]", "env": env_kind, "time": "fog", "mood": "shocked", "action": "alert", "prop": "speech", "has_shadow": True},
+        {"caption": "وعندما نظرت إلى الورقة مجدداً... كانت السطور قد تغيرت!", "speech_text": "وعندما نظرت إلى الورقة مجدداً... كانت السطور قد تغيرت! [surprised]", "env": env_kind, "time": "night", "mood": "shocked", "action": "point", "prop": "exclamation", "has_shadow": False},
+        {"caption": "أدركت أنني لم أكن زائراً... بل كنت جزءاً من الملف!", "speech_text": "أدركت أنني لم أكن زائراً... بل كنت جزءاً من الملف! [sighing]", "env": env_kind, "time": "night", "mood": "surprised", "action": "alert", "prop": "none", "has_shadow": True},
     ]
     return {
         "title": f"ملف سري #{idx} [{run_id}]: سر {place_ar}",
-        "description": f"قصة غموض طويلة ومترابطة من سلسلة ملفات سرية داخل {place_ar}. تابع التفاصيل حتى النهاية.",
-        "keywords": ["ملفات سرية", "pixel art", "قصص غموض", "شورتس", "قصة طويلة"],
+        "description": f"قصة غموض مترابطة من سلسلة ملفات سرية داخل {place_ar}. تابع التفاصيل حتى النهاية.",
+        "keywords": ["ملفات سرية", "pixel art", "قصص غموض", "شورتس", "قصة جديدة"],
         "hashtags": ["#shorts", "#pixelart", "#ملفات_سرية", "#غموض", "#قصص"],
-        "thumbnail_text": "سر المنارة",
+        "thumbnail_text": "ملف سري",
         "beats": beats,
     }
 
@@ -359,12 +364,16 @@ def generate_unique_story_payload(slot: int, history: list[dict]) -> dict:
     for attempt in range(4):
         nonce = uuid.uuid4().hex[:8]
         prompt = f"""
-ابتكر قصة غموض عربية مترابطة ومشوقة وطويلة نسبياً لقناة يوتيوب شورتس ("ملفات سرية") بإملاء عربي فصيح سليم وخالٍ من الأخطاء الإملائية.
+ابتكر قصة غموض عربية مترابطة ومشوقة لقناة يوتيوب شورتس ("ملفات سرية") بإملاء عربي فصيح سليم جداً.
 معرف الجلسة: {nonce} | المحاولة: {attempt + 1} | التاريخ: {now_utc.strftime("%Y-%m-%d %H:%M")} UTC | الفترة: #{slot}.
 
-المدة المطلوبة عند القراءة الصوتية: من 45 إلى 60 ثانية (14 إلى 15 مقطعاً متسلسلاً).
-ممنوع منعاً باتاً عمل قفزات غير منطقية أو جمل منفصلة؛ يجب أن تكون كل جملة استمراراً مباشراً وطبيعياً للجملة التي قبلها في نفس القصة والمكان.
-يمكنك تضمين وسوم تعبير صوتي إنجليزية دقيقة داخل "speech_text" في بعض المقاطع المناسبة مثل: [laughing], [whispering], [sighing], [surprised], [gasping], [nervous], [excited] (بحروف صحيحة بدون أخطاء إملائية)، بينما يبقى "caption" نصاً عربياً صافياً بدون وسوم.
+أسلوب الإلقاء المطلوب:
+- سرد قصصي بشري هادئ ومشوّق (ليس غناءً وليس قراءة آلية سريعة بلا وقفات).
+- استخدم علامات الترقيم الطبيعية بوضوح مثل (...) للتوقف والترقب، و(،) و(!) و(؟) لتنظيم التنفس والوقفات.
+- أضف وسوم تعبير صوتي دقيقة داخل "speech_text" عند الحاجة فقط مثل: [whispering], [sighing], [surprised], [gasping], [nervous], [laughing].
+- لا تضع أي رموز غريبة مثل (*) أو (`) أو علامات عشوائية.
+- اجعل "caption" نصاً عربياً صافياً بدون وسوم [...] أو <...>.
+
 ممنوع تكرار هذه العناوين أو الأفكار السابقة:
 {avoid_block}
 
@@ -377,9 +386,9 @@ def generate_unique_story_payload(slot: int, history: list[dict]) -> dict:
   "thumbnail_text": "كلمتان",
   "beats": [
     {{
-      "caption": "جملة مترابطة واضحة بإملاء صحيح من 8 إلى 13 كلمة",
-      "speech_text": "نفس الجملة مع وسم صوتي مناسب مثل [whispering] أو [laughing] عند الحاجة",
-      "env": "lighthouse",
+      "caption": "جملة قصيرة واضحة بإملاء صحيح من 6 إلى 11 كلمة مع علامات ترقيم",
+      "speech_text": "نفس الجملة مع علامات الترقيم ووسم صوتي مناسب عند الحاجة",
+      "env": "library",
       "time": "night",
       "mood": "neutral",
       "action": "walk",
@@ -390,8 +399,7 @@ def generate_unique_story_payload(slot: int, history: list[dict]) -> dict:
 }}
 
 القواعد الصارمة:
-- عدد المقاطع (beats) يجب أن يكون 14 إلى 15 مقطعاً مترابطاً تحكي قصة واحدة متماسكة من البداية إلى النهاية.
-- التزم بالإملاء العربي الصحيح (الهمزات، الألف المقصورة، التاء المربوطة، وعلامات الترقيم).
+- عدد المقاطع (beats) يجب أن يكون 13 إلى 15 مقطعاً مترابطاً من البداية إلى النهاية.
 - "env": اختر من ["lighthouse", "forest", "tunnel", "library", "ship", "basement", "alley", "corridor", "room", "street"].
 - "time": اختر من ["night", "fog", "dusk", "day"].
 - "mood": اختر من ["neutral", "surprised", "shocked", "happy", "curious"].
@@ -428,68 +436,91 @@ def px_rect(draw: ImageDraw.ImageDraw, x0: int, y0: int, x1: int, y1: int, fill,
 
 
 def draw_dynamic_scene(draw: ImageDraw.ImageDraw, env: str, time_of_day: str, frame_idx: int, seed_offset: int) -> None:
-    rng = random.Random(seed_offset + (frame_idx // 6))
+    rng = random.Random(seed_offset + (frame_idx // 5))
 
     if time_of_day == "day":
-        sky_top, sky_bot, ground_c = (104, 184, 244), (168, 222, 252), (78, 158, 72)
+        sky_top, sky_bot, wall_c, floor_c = (112, 186, 240), (176, 224, 250), (218, 206, 188), (146, 128, 106)
     elif time_of_day == "dusk":
-        sky_top, sky_bot, ground_c = (58, 30, 82), (204, 88, 72), (50, 42, 68)
+        sky_top, sky_bot, wall_c, floor_c = (56, 36, 78), (206, 102, 78), (94, 72, 92), (62, 50, 68)
     elif time_of_day == "fog":
-        sky_top, sky_bot, ground_c = (72, 86, 98), (124, 138, 146), (54, 68, 72)
+        sky_top, sky_bot, wall_c, floor_c = (78, 92, 104), (138, 150, 158), (82, 86, 96), (64, 66, 74)
     else:
-        sky_top, sky_bot, ground_c = (18 + (seed_offset % 14), 20, 48 + (seed_offset % 18)), (32, 28, 64), (62, 60, 82)
+        sky_top, sky_bot, wall_c, floor_c = (24, 28, 56), (44, 46, 82), (76, 68, 98), (54, 48, 72)
 
-    px_rect(draw, 0, 0, GRID_W - 1, 28, sky_top)
-    px_rect(draw, 0, 29, GRID_W - 1, 36, sky_bot)
+    # سماء متدرجة بيكسلية مع طبقات سحب ونجوم
+    for y in range(0, 56, 4):
+        t = y / 56.0
+        col = (
+            int(sky_top[0] * (1 - t) + sky_bot[0] * t),
+            int(sky_top[1] * (1 - t) + sky_bot[1] * t),
+            int(sky_top[2] * (1 - t) + sky_bot[2] * t),
+        )
+        px_rect(draw, 0, y, GRID_W - 1, y + 3, col)
 
-    if time_of_day in ("night", "dusk"):
-        mx = 8 + (seed_offset % 46)
-        px_rect(draw, mx, 6, mx + 6, 12, (248, 240, 188))
-        for _ in range(10):
-            sx, sy = rng.randint(2, GRID_W - 3), rng.randint(2, 22)
-            px_rect(draw, sx, sy, sx, sy, (240, 244, 255))
+    if time_of_day in ("night", "dusk", "fog"):
+        mx = 92
+        px_rect(draw, mx, 10, mx + 10, 20, (248, 242, 196), outline=(196, 188, 136))
+        px_rect(draw, mx + 2, 12, mx + 4, 14, (226, 218, 172))
+        for i in range(18):
+            sx, sy = rng.randint(4, GRID_W - 6), rng.randint(4, 38)
+            twinkle = (245, 248, 255) if ((i + frame_idx) % 4 != 0) else (150, 165, 210)
+            px_rect(draw, sx, sy, sx + 1, sy + 1, twinkle)
 
-    if env == "lighthouse":
-        px_rect(draw, 0, 76, GRID_W - 1, GRID_H - 1, (30, 72, 116))
-        px_rect(draw, 46, 18, 58, 78, (226, 228, 238), outline=(18, 20, 30))
-        for ry in range(24, 74, 12):
-            px_rect(draw, 46, ry, 58, ry + 5, (196, 58, 58))
-        px_rect(draw, 48, 12, 56, 18, (255, 232, 120))
+    # طبقات سحب بيكسلية متحركة بطيئة
+    cloud_shift = (frame_idx // 2) % 24
+    for cx in range(-16 + cloud_shift, GRID_W + 16, 36):
+        cy = 18 + (abs(cx) % 10)
+        px_rect(draw, cx, cy + 2, cx + 14, cy + 6, (186, 192, 218))
+        px_rect(draw, cx + 3, cy, cx + 10, cy + 5, (214, 218, 236))
+
+    # جدار خلفي بتفاصيل معمارية وأرضية ذات عمق
+    px_rect(draw, 0, 56, GRID_W - 1, 148, wall_c)
+    for wy in range(60, 146, 8):
+        shade = (max(0, wall_c[0] - 10), max(0, wall_c[1] - 10), max(0, wall_c[2] - 10))
+        px_rect(draw, 0, wy, GRID_W - 1, wy, shade)
+
+    # نافذة بإطار وعتبة وزجاج
+    win_x, win_y = 82, 66
+    px_rect(draw, win_x, win_y, win_x + 24, win_y + 26, (44, 38, 58), outline=(20, 18, 28))
+    px_rect(draw, win_x + 2, win_y + 2, win_x + 11, win_y + 12, (62, 78, 122))
+    px_rect(draw, win_x + 13, win_y + 2, win_x + 22, win_y + 12, (62, 78, 122))
+    px_rect(draw, win_x + 2, win_y + 14, win_x + 11, win_y + 24, (54, 68, 108))
+    px_rect(draw, win_x + 13, win_y + 14, win_x + 22, win_y + 24, (54, 68, 108))
+    px_rect(draw, win_x - 1, win_y + 26, win_x + 25, win_y + 28, (112, 86, 68), outline=(22, 18, 26))
+
+    if env == "library":
+        # خزائن كتب بتفاصيل رفوف وأغلفة ملونة وآلة قديمة على مكتب
+        for sx in range(8, 72, 22):
+            px_rect(draw, sx, 64, sx + 18, 146, (68, 44, 30), outline=(24, 16, 12))
+            for ry in range(72, 140, 14):
+                px_rect(draw, sx + 2, ry + 6, sx + 16, ry + 8, (48, 30, 20))
+                for bx in range(sx + 2, sx + 15, 3):
+                    bc = (176, 68, 58) if (bx % 6 == 0) else ((68, 124, 168) if (bx % 4 == 0) else (188, 148, 64))
+                    px_rect(draw, bx, ry, bx + 2, ry + 5, bc)
+        px_rect(draw, 14, 118, 46, 148, (96, 62, 38), outline=(24, 16, 12))
+        px_rect(draw, 18, 108, 40, 118, (64, 122, 98), outline=(20, 24, 22))
+        px_rect(draw, 22, 102, 36, 108, (232, 228, 214))
+    elif env == "lighthouse":
+        px_rect(draw, 84, 30, 102, 148, (226, 228, 236), outline=(22, 24, 34))
+        for ry in range(38, 142, 18):
+            px_rect(draw, 84, ry, 102, ry + 8, (196, 62, 62))
+        px_rect(draw, 86, 22, 100, 30, (255, 228, 112), outline=(36, 32, 24))
     elif env == "forest":
-        px_rect(draw, 0, 74, GRID_W - 1, GRID_H - 1, ground_c)
-        for tx in range(4, GRID_W - 6, 14):
-            px_rect(draw, tx, 38, tx + 4, 75, (74, 46, 30), outline=(18, 14, 12))
-            px_rect(draw, tx - 4, 22, tx + 8, 42, (36, 96, 58), outline=(16, 28, 20))
-    elif env == "tunnel":
-        px_rect(draw, 0, 0, GRID_W - 1, 86, (42, 46, 62))
-        px_rect(draw, 22, 24, 50, 86, (22, 24, 34), outline=(96, 102, 124))
-        px_rect(draw, 0, 87, GRID_W - 1, GRID_H - 1, (64, 66, 78))
-    elif env == "library":
-        px_rect(draw, 0, 0, GRID_W - 1, 86, (84, 52, 34))
-        for sx in range(4, GRID_W - 8, 18):
-            px_rect(draw, sx, 22, sx + 14, 76, (58, 36, 22), outline=(22, 16, 12))
-            for by in range(26, 72, 10):
-                px_rect(draw, sx + 2, by, sx + 12, by + 5, (168, 68, 58))
-        px_rect(draw, 0, 87, GRID_W - 1, GRID_H - 1, (108, 70, 44))
-    elif env == "ship":
-        px_rect(draw, 0, 78, GRID_W - 1, GRID_H - 1, (26, 62, 94))
-        px_rect(draw, 8, 54, 62, 80, (92, 54, 34), outline=(18, 14, 12))
-        px_rect(draw, 32, 18, 36, 54, (64, 40, 26))
-    elif env == "basement":
-        px_rect(draw, 0, 0, GRID_W - 1, 86, (54, 52, 64))
-        px_rect(draw, 30, 34, 42, 62, (28, 26, 34), outline=(16, 16, 20))
-        px_rect(draw, 0, 87, GRID_W - 1, GRID_H - 1, (72, 70, 82))
-    else:
-        px_rect(draw, 0, 36, GRID_W - 1, 86, (128, 64, 60))
-        for bx in range(4, GRID_W - 10, 16):
-            bh = 18 + ((bx + seed_offset) % 10)
-            px_rect(draw, bx, 37 - bh, bx + 12, 36, (32, 36, 56), outline=(16, 18, 28))
-        px_rect(draw, 0, 87, GRID_W - 1, GRID_H - 1, ground_c)
+        for tx in range(8, GRID_W - 10, 24):
+            px_rect(draw, tx + 3, 86, tx + 7, 148, (78, 50, 32), outline=(22, 16, 12))
+            px_rect(draw, tx - 3, 62, tx + 13, 88, (38, 104, 62), outline=(18, 34, 24))
+            px_rect(draw, tx, 50, tx + 10, 66, (52, 126, 74))
+
+    # أرضية بخطوط أفقية لإعطاء عمق ومنظور
+    px_rect(draw, 0, 148, GRID_W - 1, GRID_H - 1, floor_c)
+    for fy in range(152, GRID_H, 10):
+        line_c = (max(0, floor_c[0] - 12), max(0, floor_c[1] - 12), max(0, floor_c[2] - 12))
+        px_rect(draw, 0, fy, GRID_W - 1, fy, line_c)
 
     if time_of_day == "fog":
-        fog_shift = (frame_idx * 2) % 12
-        for fy in range(42, 86, 10):
-            px_rect(draw, fog_shift, fy, GRID_W - 12 + (fog_shift // 2), fy + 2, (195, 205, 212))
+        shift = (frame_idx * 2) % 18
+        for fy in range(118, 152, 12):
+            px_rect(draw, shift, fy, GRID_W - 18 + (shift // 2), fy + 3, (198, 206, 214))
 
 
 def draw_character(
@@ -499,108 +530,123 @@ def draw_character(
     step_phase: int,
     mood: str = "neutral",
     action: str = "walk",
-    shirt_color=(102, 112, 212),
+    shirt_color=(98, 118, 214),
     is_shadow: bool = False,
 ) -> None:
     outline = (16, 16, 24)
     if is_shadow:
-        hair_c = (28, 28, 44)
-        skin_c = (34, 34, 52)
-        shirt_c = (24, 24, 40)
-        pants_c = (18, 18, 32)
-        eye_c = (135, 155, 235)
+        hair_c = (24, 24, 38)
+        skin_c = (32, 32, 48)
+        shirt_c = (22, 22, 36)
+        pants_c = (18, 18, 30)
+        eye_c = (145, 165, 240)
+        # ظل أرضي بيضاوي تحت الشخصية
+        px_rect(draw, cx - 8, cy + 5, cx + 8, cy + 7, (14, 14, 24))
     else:
-        hair_c = (36, 36, 48)
-        skin_c = (242, 196, 156)
+        hair_c = (38, 34, 48)
+        skin_c = (242, 196, 158)
         shirt_c = shirt_color
-        pants_c = (48, 56, 86)
+        pants_c = (46, 56, 86)
         eye_c = (20, 20, 28)
+        px_rect(draw, cx - 8, cy + 5, cx + 8, cy + 7, (24, 22, 34))
 
-    px_rect(draw, cx - 5, cy - 22, cx + 5, cy - 11, skin_c, outline=outline)
-    px_rect(draw, cx - 5, cy - 23, cx + 5, cy - 17, hair_c, outline=outline)
+    # الرأس والشعر والأذنان
+    px_rect(draw, cx - 7, cy - 34, cx + 7, cy - 18, skin_c, outline=outline)
+    px_rect(draw, cx - 8, cy - 28, cx - 7, cy - 24, skin_c, outline=outline)
+    px_rect(draw, cx + 7, cy - 28, cx + 8, cy - 24, skin_c, outline=outline)
+    px_rect(draw, cx - 7, cy - 36, cx + 7, cy - 28, hair_c, outline=outline)
+    px_rect(draw, cx - 7, cy - 29, cx - 4, cy - 27, hair_c)
 
+    # العيون والتعابير
     if mood == "shocked":
-        px_rect(draw, cx - 4, cy - 16, cx - 2, cy - 13, (255, 255, 255))
-        px_rect(draw, cx + 2, cy - 16, cx + 4, cy - 13, (255, 255, 255))
-        px_rect(draw, cx - 3, cy - 15, cx - 3, cy - 14, eye_c)
-        px_rect(draw, cx + 3, cy - 15, cx + 3, cy - 14, eye_c)
-        px_rect(draw, cx - 1, cy - 12, cx + 1, cy - 11, (40, 20, 24))
+        px_rect(draw, cx - 5, cy - 25, cx - 2, cy - 21, (255, 255, 255), outline=outline)
+        px_rect(draw, cx + 2, cy - 25, cx + 5, cy - 21, (255, 255, 255), outline=outline)
+        px_rect(draw, cx - 4, cy - 24, cx - 3, cy - 22, eye_c)
+        px_rect(draw, cx + 3, cy - 24, cx + 4, cy - 22, eye_c)
+        px_rect(draw, cx - 2, cy - 20, cx + 2, cy - 18, (46, 22, 26))
     elif mood == "surprised":
-        px_rect(draw, cx - 3, cy - 16, cx - 2, cy - 13, eye_c)
-        px_rect(draw, cx + 2, cy - 16, cx + 3, cy - 13, eye_c)
-        px_rect(draw, cx, cy - 12, cx, cy - 11, (40, 20, 24))
+        px_rect(draw, cx - 4, cy - 25, cx - 2, cy - 22, eye_c)
+        px_rect(draw, cx + 2, cy - 25, cx + 4, cy - 22, eye_c)
+        px_rect(draw, cx - 1, cy - 20, cx + 1, cy - 19, (46, 22, 26))
     elif mood == "happy":
-        px_rect(draw, cx - 4, cy - 15, cx - 2, cy - 14, eye_c)
-        px_rect(draw, cx + 2, cy - 15, cx + 4, cy - 14, eye_c)
-        px_rect(draw, cx - 2, cy - 12, cx + 2, cy - 12, (185, 78, 78))
+        px_rect(draw, cx - 5, cy - 24, cx - 2, cy - 23, eye_c)
+        px_rect(draw, cx + 2, cy - 24, cx + 5, cy - 23, eye_c)
+        px_rect(draw, cx - 3, cy - 20, cx + 3, cy - 19, (186, 76, 76))
     else:
-        px_rect(draw, cx - 3, cy - 15, cx - 2, cy - 14, eye_c)
-        px_rect(draw, cx + 2, cy - 15, cx + 3, cy - 14, eye_c)
-        px_rect(draw, cx - 1, cy - 12, cx + 1, cy - 12, (90, 58, 52))
+        px_rect(draw, cx - 4, cy - 24, cx - 2, cy - 22, eye_c)
+        px_rect(draw, cx + 2, cy - 24, cx + 4, cy - 22, eye_c)
+        px_rect(draw, cx - 2, cy - 20, cx + 2, cy - 19, (92, 58, 52))
 
-    px_rect(draw, cx - 5, cy - 10, cx + 5, cy - 2, shirt_c, outline=outline)
+    # الجذع والياقة والأكمام
+    px_rect(draw, cx - 7, cy - 17, cx + 7, cy - 4, shirt_c, outline=outline)
+    px_rect(draw, cx - 2, cy - 17, cx + 2, cy - 15, (238, 240, 248))
 
     if action == "point":
-        px_rect(draw, cx - 8, cy - 10, cx - 6, cy - 3, shirt_c, outline=outline)
-        px_rect(draw, cx + 6, cy - 12, cx + 10, cy - 10, shirt_c, outline=outline)
+        px_rect(draw, cx - 10, cy - 16, cx - 8, cy - 6, shirt_c, outline=outline)
+        px_rect(draw, cx + 8, cy - 18, cx + 14, cy - 15, shirt_c, outline=outline)
+        px_rect(draw, cx + 14, cy - 18, cx + 16, cy - 16, skin_c, outline=outline)
     elif action == "wave":
-        w = (step_phase % 2) * -1
-        px_rect(draw, cx - 8, cy - 10, cx - 6, cy - 3, shirt_c, outline=outline)
-        px_rect(draw, cx + 6, cy - 14 + w, cx + 8, cy - 7 + w, shirt_c, outline=outline)
+        w = -2 if (step_phase % 2 == 0) else 0
+        px_rect(draw, cx - 10, cy - 16, cx - 8, cy - 6, shirt_c, outline=outline)
+        px_rect(draw, cx + 8, cy - 22 + w, cx + 10, cy - 11 + w, shirt_c, outline=outline)
+        px_rect(draw, cx + 8, cy - 24 + w, cx + 10, cy - 22 + w, skin_c, outline=outline)
     elif action == "alert":
-        px_rect(draw, cx - 8, cy - 12, cx - 6, cy - 7, shirt_c, outline=outline)
-        px_rect(draw, cx + 6, cy - 12, cx + 8, cy - 7, shirt_c, outline=outline)
+        px_rect(draw, cx - 10, cy - 19, cx - 8, cy - 11, shirt_c, outline=outline)
+        px_rect(draw, cx + 8, cy - 19, cx + 10, cy - 11, shirt_c, outline=outline)
     else:
-        px_rect(draw, cx - 8, cy - 10, cx - 6, cy - 3, shirt_c, outline=outline)
-        px_rect(draw, cx + 6, cy - 10, cx + 8, cy - 3, shirt_c, outline=outline)
+        px_rect(draw, cx - 10, cy - 16, cx - 8, cy - 6, shirt_c, outline=outline)
+        px_rect(draw, cx + 8, cy - 16, cx + 10, cy - 6, shirt_c, outline=outline)
 
-    left_y = cy - 1 if (step_phase % 2 == 0) else cy - 2
-    right_y = cy - 2 if (step_phase % 2 == 0) else cy - 1
-    px_rect(draw, cx - 4, left_y, cx - 1, cy + 3, pants_c, outline=outline)
-    px_rect(draw, cx + 1, right_y, cx + 4, cy + 3, pants_c, outline=outline)
+    # الأرجل وحركة المشي
+    step_l = -1 if (step_phase % 2 == 0) else 1
+    step_r = 1 if (step_phase % 2 == 0) else -1
+    px_rect(draw, cx - 6, cy - 3, cx - 1, cy + 4 + step_l, pants_c, outline=outline)
+    px_rect(draw, cx + 1, cy - 3, cx + 6, cy + 4 + step_r, pants_c, outline=outline)
+    px_rect(draw, cx - 6, cy + 4 + step_l, cx - 1, cy + 5 + step_l, (28, 26, 34))
+    px_rect(draw, cx + 1, cy + 4 + step_r, cx + 6, cy + 5 + step_r, (28, 26, 34))
 
 
 def draw_prop(draw: ImageDraw.ImageDraw, cx: int, cy: int, prop: str, frame_idx: int) -> None:
     bob = (frame_idx % 4) // 2
-    py = cy - 32 - bob
+    py = cy - 48 - bob
     if prop == "exclamation":
-        px_rect(draw, cx, py, cx + 1, py + 6, (245, 68, 58), outline=(20, 16, 20))
-        px_rect(draw, cx, py + 8, cx + 1, py + 9, (245, 68, 58), outline=(20, 16, 20))
+        px_rect(draw, cx - 1, py, cx + 1, py + 7, (245, 68, 58), outline=(20, 16, 20))
+        px_rect(draw, cx - 1, py + 9, cx + 1, py + 11, (245, 68, 58), outline=(20, 16, 20))
     elif prop == "idea":
-        px_rect(draw, cx - 2, py, cx + 3, py + 5, (255, 224, 72), outline=(25, 22, 20))
-        px_rect(draw, cx - 1, py + 6, cx + 2, py + 8, (180, 185, 195))
+        px_rect(draw, cx - 3, py, cx + 4, py + 6, (255, 224, 72), outline=(25, 22, 20))
+        px_rect(draw, cx - 2, py + 7, cx + 3, py + 9, (186, 190, 200))
     elif prop == "speech":
-        px_rect(draw, cx - 5, py, cx + 6, py + 6, (245, 248, 255), outline=(20, 22, 30))
-        for dx in [-2, 0, 2]:
-            px_rect(draw, cx + dx, py + 2, cx + dx, py + 4, (35, 38, 52))
+        px_rect(draw, cx - 7, py, cx + 8, py + 7, (245, 248, 255), outline=(20, 22, 30))
+        for dx in [-3, 0, 3]:
+            px_rect(draw, cx + dx, py + 3, cx + dx, py + 5, (35, 38, 52))
     elif prop == "heart":
-        px_rect(draw, cx - 3, py + 1, cx + 4, py + 4, (238, 64, 98))
-        px_rect(draw, cx - 2, py, cx, py + 1, (238, 64, 98))
-        px_rect(draw, cx + 1, py, cx + 3, py + 1, (238, 64, 98))
-        px_rect(draw, cx - 1, py + 5, cx + 2, py + 6, (238, 64, 98))
-        px_rect(draw, cx, py + 7, cx + 1, py + 7, (238, 64, 98))
+        px_rect(draw, cx - 4, py + 1, cx + 5, py + 5, (238, 64, 98))
+        px_rect(draw, cx - 3, py, cx, py + 1, (238, 64, 98))
+        px_rect(draw, cx + 1, py, cx + 4, py + 1, (238, 64, 98))
+        px_rect(draw, cx - 2, py + 6, cx + 3, py + 7, (238, 64, 98))
+        px_rect(draw, cx - 1, py + 8, cx + 2, py + 9, (238, 64, 98))
 
 
 def apply_after_effects_polish(img: Image.Image, char_x: int, char_y: int, mood: str, frame_idx: int, num_frames: int, story_seed: int) -> Image.Image:
     glow_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     gdraw = ImageDraw.Draw(glow_layer)
     gx = char_x * PX + PX // 2
-    gy = (char_y - 10) * PX
-    pulse = int(math.sin((frame_idx / max(num_frames, 1)) * math.pi * 2) * 25)
-    glow_color = (255, 210, 120, max(25, 55 + pulse)) if mood in ("shocked", "surprised") else (130, 185, 255, max(20, 42 + pulse))
+    gy = (char_y - 14) * PX
+    pulse = int(math.sin((frame_idx / max(num_frames, 1)) * math.pi * 2) * 24)
+    glow_color = (255, 206, 118, max(24, 52 + pulse)) if mood in ("shocked", "surprised") else (130, 185, 255, max(18, 38 + pulse))
     gdraw.ellipse([gx - 220, gy - 220, gx + 220, gy + 220], fill=glow_color)
-    glow_layer = glow_layer.filter(ImageFilter.GaussianBlur(radius=65))
+    glow_layer = glow_layer.filter(ImageFilter.GaussianBlur(radius=60))
 
     part_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     pdraw = ImageDraw.Draw(part_layer)
     rng = random.Random(story_seed + 999)
-    for i in range(18):
+    for i in range(16):
         bx = rng.randint(60, W - 60)
         by = rng.randint(180, 1320)
-        dx = int(math.sin(frame_idx * 0.12 + i) * 28)
-        dy = int(math.cos(frame_idx * 0.09 + i) * 22)
-        alpha = 45 + ((i * 7 + frame_idx * 5) % 55)
-        pdraw.ellipse([bx + dx, by + dy, bx + dx + 8, by + dy + 8], fill=(245, 240, 220, alpha))
+        dx = int(math.sin(frame_idx * 0.12 + i) * 26)
+        dy = int(math.cos(frame_idx * 0.09 + i) * 20)
+        alpha = 40 + ((i * 7 + frame_idx * 5) % 50)
+        pdraw.ellipse([bx + dx, by + dy, bx + dx + 7, by + dy + 7], fill=(245, 240, 220, alpha))
     part_layer = part_layer.filter(ImageFilter.GaussianBlur(radius=2))
 
     vig_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
@@ -617,12 +663,12 @@ def apply_after_effects_polish(img: Image.Image, char_x: int, char_y: int, mood:
 
     progress = frame_idx / max(num_frames - 1, 1)
     ease = 0.5 - 0.5 * math.cos(progress * math.pi)
-    zoom_factor = 1.0 + 0.045 * ease
+    zoom_factor = 1.0 + 0.04 * ease
     crop_w = int(W / zoom_factor)
     crop_h = int(H / zoom_factor)
 
-    shake_x = int(math.sin(frame_idx * 1.9) * 8) if mood == "shocked" else 0
-    shake_y = int(math.cos(frame_idx * 2.3) * 6) if mood == "shocked" else 0
+    shake_x = int(math.sin(frame_idx * 1.9) * 7) if mood == "shocked" else 0
+    shake_y = int(math.cos(frame_idx * 2.3) * 5) if mood == "shocked" else 0
 
     left = max(0, min(W - crop_w, (W - crop_w) // 2 + shake_x))
     top = max(0, min(H - crop_h, (H - crop_h) // 2 + shake_y))
@@ -645,27 +691,55 @@ def load_arabic_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     return ImageFont.load_default()
 
 
-def wrap_caption_lines(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, max_w: int) -> list[str]:
-    words = text.split()
+def draw_outlined_text(
+    draw: ImageDraw.ImageDraw,
+    pos: tuple[int, int],
+    text: str,
+    font: ImageFont.ImageFont,
+    fill=(255, 255, 255),
+    stroke_fill=(12, 14, 24),
+    stroke_width: int = 5,
+) -> None:
+    x, y = pos
+    for dx in range(-stroke_width, stroke_width + 1):
+        for dy in range(-stroke_width, stroke_width + 1):
+            if dx == 0 and dy == 0:
+                continue
+            if (dx * dx + dy * dy) <= (stroke_width * stroke_width + 2):
+                draw.text((x + dx, y + dy), text, font=font, fill=stroke_fill)
+    draw.text((x, y + 3), text, font=font, fill=(6, 8, 14))
+    draw.text((x, y), text, font=font, fill=fill)
+
+
+def build_auto_caption_chunks(text: str, num_frames: int) -> list[tuple[int, int, list[str]]]:
+    words = [w for w in text.split() if w.strip()]
     if not words:
         return []
-    lines: list[str] = []
-    cur = words[0]
-    for w in words[1:]:
-        test = f"{cur} {w}"
-        bbox = draw.textbbox((0, 0), test, font=font)
-        if (bbox[2] - bbox[0]) <= max_w:
-            cur = test
-        else:
-            lines.append(cur)
-            cur = w
-    lines.append(cur)
-    return lines[:2]
+
+    chunks: list[str] = []
+    cur: list[str] = []
+    for w in words:
+        cur.append(w)
+        if len(cur) >= 3 or w.endswith((".", "!", "؟", "،", ":")):
+            chunks.append(" ".join(cur))
+            cur = []
+    if cur:
+        chunks.append(" ".join(cur))
+
+    n_chunks = len(chunks)
+    result: list[tuple[int, int, list[str]]] = []
+    for i, ch in enumerate(chunks):
+        start_f = int(round((i / n_chunks) * num_frames))
+        end_f = int(round(((i + 1) / n_chunks) * num_frames))
+        if end_f <= start_f:
+            end_f = min(num_frames, start_f + 1)
+        result.append((start_f, end_f, ch.split()))
+    return result
 
 
 def render_beat_frames(beat: dict, beat_idx: int, duration_sec: float, story_seed: int, fps: int = 12) -> list[Path]:
     num_frames = max(int(round(duration_sec * fps)), 10)
-    env = str(beat.get("env", "lighthouse")).strip()
+    env = str(beat.get("env", "library")).strip()
     time_of_day = str(beat.get("time", "night")).strip()
     mood = str(beat.get("mood", "neutral")).strip()
     action = str(beat.get("action", "walk")).strip()
@@ -674,14 +748,15 @@ def render_beat_frames(beat: dict, beat_idx: int, duration_sec: float, story_see
     caption_raw = fix_arabic_spelling(strip_emotes_for_caption(beat.get("caption", "")))
 
     shirt_palette = [
-        (102, 112, 212),
-        (214, 96, 88),
-        (72, 168, 138),
-        (218, 152, 66),
-        (158, 98, 214),
+        (98, 118, 214),
+        (212, 94, 86),
+        (70, 166, 136),
+        (216, 150, 64),
+        (156, 96, 210),
     ]
     shirt_color = shirt_palette[(story_seed + beat_idx) % len(shirt_palette)]
-    font_cap = load_arabic_font(52)
+    font_cap = load_arabic_font(62)
+    chunks_timeline = build_auto_caption_chunks(caption_raw, num_frames)
     out_frames: list[Path] = []
 
     for f_i in range(num_frames):
@@ -689,10 +764,10 @@ def render_beat_frames(beat: dict, beat_idx: int, duration_sec: float, story_see
         draw = ImageDraw.Draw(img)
 
         draw_dynamic_scene(draw, env, time_of_day, f_i, story_seed + beat_idx * 37)
-        char_y = 92
+        char_y = 152
 
-        drift = int(math.sin((f_i / max(num_frames, 1)) * math.pi) * 6)
-        char_x = 16 + ((story_seed + beat_idx * 5) % 14) + drift
+        drift = int(math.sin((f_i / max(num_frames, 1)) * math.pi) * 8)
+        char_x = 34 + ((story_seed + beat_idx * 7) % 20) + drift
         draw_character(
             draw,
             char_x,
@@ -705,7 +780,7 @@ def render_beat_frames(beat: dict, beat_idx: int, duration_sec: float, story_see
         )
 
         if has_shadow:
-            shadow_x = min(char_x + 22 - (drift // 2), GRID_W - 8)
+            shadow_x = min(char_x + 32 - (drift // 2), GRID_W - 14)
             draw_character(
                 draw,
                 shadow_x,
@@ -722,28 +797,57 @@ def render_beat_frames(beat: dict, beat_idx: int, duration_sec: float, story_see
         img = apply_after_effects_polish(img, char_x, char_y, mood, f_i, num_frames, story_seed + beat_idx * 13)
         draw = ImageDraw.Draw(img)
 
-        if caption_raw:
-            lines = wrap_caption_lines(draw, caption_raw, font_cap, W - 140)
-            line_boxes = [draw.textbbox((0, 0), ln, font=font_cap) for ln in lines]
-            line_h = max([(b[3] - b[1]) for b in line_boxes] or [56])
-            max_line_w = max([(b[2] - b[0]) for b in line_boxes] or [200])
+        # Auto Caption ديناميكي متزامن مع زمن المقطع
+        active_words: list[str] = []
+        active_idx = 0
+        for sf, ef, w_list in chunks_timeline:
+            if sf <= f_i < ef:
+                active_words = w_list
+                span = max(ef - sf, 1)
+                rel = (f_i - sf) / span
+                active_idx = min(len(w_list) - 1, int(rel * len(w_list)))
+                break
+        if not active_words and chunks_timeline:
+            active_words = chunks_timeline[-1][2]
+            active_idx = len(active_words) - 1
 
-            box_w = min(max_line_w + 76, W - 70)
-            box_h = len(lines) * (line_h + 10) + 34
-            bx0 = (W - box_w) // 2
-            by0 = 1410
-            bx1 = bx0 + box_w
-            by1 = by0 + box_h
+        if active_words:
+            # نعرض العبارة كاملة مع تمييز الكلمة النشطة حالياً
+            full_line = " ".join(active_words)
+            bbox_all = draw.textbbox((0, 0), full_line, font=font_cap)
+            line_h = max(bbox_all[3] - bbox_all[1], 68)
+            base_y = 1430
 
-            draw.rounded_rectangle([bx0 + 6, by0 + 8, bx1 + 6, by1 + 8], radius=22, fill=(5, 6, 12))
-            draw.rounded_rectangle([bx0, by0, bx1, by1], radius=22, fill=(14, 16, 26), outline=(120, 210, 175), width=3)
-            cur_y = by0 + 16
-            for ln, b in zip(lines, line_boxes):
-                lw = b[2] - b[0]
-                lx = (W - lw) // 2
-                draw.text((lx + 3, cur_y + 3), ln, font=font_cap, fill=(8, 10, 18))
-                draw.text((lx, cur_y), ln, font=font_cap, fill=(255, 255, 255))
-                cur_y += line_h + 10
+            # شريط كلمة نشطة متحرك في الأسفل لإبراز الإيقاع اللفظي
+            cur_word = active_words[active_idx]
+            w_box = draw.textbbox((0, 0), cur_word, font=font_cap)
+            pw = (w_box[2] - w_box[0]) + 44
+            ph = line_h + 18
+            px0 = (W - pw) // 2
+            py0 = base_y + line_h + 20
+            draw.rounded_rectangle([px0 + 4, py0 + 6, px0 + pw + 4, py0 + ph + 6], radius=18, fill=(8, 10, 18))
+            draw.rounded_rectangle([px0, py0, px0 + pw, py0 + ph], radius=18, fill=(255, 214, 72), outline=(18, 20, 30), width=3)
+            draw_outlined_text(
+                draw,
+                ((W - (w_box[2] - w_box[0])) // 2, py0 + 6),
+                cur_word,
+                font=font_cap,
+                fill=(18, 20, 32),
+                stroke_fill=(255, 236, 150),
+                stroke_width=2,
+            )
+
+            # السطر الرئيسي للكابشن بحواف داكنة واضحة دون صندوق مستطيل ثقيل
+            lx = (W - (bbox_all[2] - bbox_all[0])) // 2
+            draw_outlined_text(
+                draw,
+                (lx, base_y),
+                full_line,
+                font=font_cap,
+                fill=(255, 255, 255),
+                stroke_fill=(10, 12, 22),
+                stroke_width=5,
+            )
 
         frame_path = OUT_DIR / f"beat_{beat_idx:02d}_f{f_i:03d}.png"
         img.save(frame_path)
@@ -814,9 +918,9 @@ def try_google_ai_studio_tts(google_script: str, audio_path: Path) -> bool:
         try:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={google_key}"
             prompt_text = (
-                f"اقرأ النص التالي باللغة العربية مع التزام التعبيرات الصوتية داخل الأقواس الزاوية مثل <laughing> و<whispering> و<sighing>:\n\n{google_script}"
+                f"اقرأ النص التالي باللغة العربية بأسلوب سرد قصصي طبيعي هادئ مع الوقف عند علامات الترقيم والتزام التعبيرات داخل الأقواس الزاوية مثل <laughing> و<whispering> و<sighing> دون غناء:\n\n{google_script}"
                 if "3.8" in model_name
-                else f"اقرأ هذه القصة بوضوح وتشويق باللغة العربية:\n\n{strip_emotes_for_caption(google_script)}"
+                else f"اقرأ هذه القصة بأسلوب سردي واضح ومتزن باللغة العربية دون غناء:\n\n{strip_emotes_for_caption(google_script)}"
             )
             payload = {
                 "contents": [{"parts": [{"text": prompt_text}]}],
@@ -892,19 +996,19 @@ def try_google_ai_studio_tts(google_script: str, audio_path: Path) -> bool:
 
 async def generate_continuous_voice(beats: list[dict], audio_path: Path) -> list[float]:
     raw_lines = [
-        normalize_brackets_in_speech_text(fix_arabic_spelling(b.get("speech_text") or b.get("caption", ""))) or "ملفات سرية"
+        normalize_brackets_in_speech_text(fix_arabic_spelling(b.get("speech_text") or b.get("caption", ""))) or "ملفات سرية..."
         for b in beats
     ]
     clean_lines = [strip_emotes_for_caption(line) or "ملفات سرية" for line in raw_lines]
 
-    fish_script = " ".join(format_tts_for_provider(line, "fish") for line in raw_lines)
-    google_script = " ".join(format_tts_for_provider(line, "google") for line in raw_lines)
-    edge_script = " ".join(format_tts_for_provider(line, "edge") for line in raw_lines)
+    fish_script = "  ".join(format_tts_for_provider(line, "fish") for line in raw_lines)
+    google_script = "  ".join(format_tts_for_provider(line, "google") for line in raw_lines)
+    edge_script = "  ".join(format_tts_for_provider(line, "edge") for line in raw_lines)
 
     if not try_fish_audio_tts(fish_script, audio_path):
         if not try_google_ai_studio_tts(google_script, audio_path):
             voice = "ar-SA-HamedNeural"
-            comm = edge_tts.Communicate(text=edge_script, voice=voice, rate="+2%")
+            comm = edge_tts.Communicate(text=edge_script, voice=voice, rate="+0%")
             with open(audio_path, "wb") as f:
                 async for chunk in comm.stream():
                     if chunk["type"] == "audio":
@@ -926,7 +1030,7 @@ def create_thumbnail(first_frame: Path, thumb_text: str, out_thumb: Path) -> Non
     bbox = draw.textbbox((0, 0), clean_t, font=font_t)
     tw = bbox[2] - bbox[0]
     tx = (W - tw) // 2
-    draw.text((tx, 1650), clean_t, font=font_t, fill=(255, 220, 72))
+    draw_outlined_text(draw, (tx, 1650), clean_t, font=font_t, fill=(255, 220, 72), stroke_fill=(10, 12, 20), stroke_width=4)
     im.save(out_thumb)
 
 
